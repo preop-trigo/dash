@@ -797,6 +797,66 @@ with tab_prazos:
     fig.update_layout(height=360, showlegend=False, plot_bgcolor="white", paper_bgcolor="white", xaxis_title="", yaxis_title="Projetos")
     st.plotly_chart(fig, use_container_width=True)
 
+    # ---------- Inaugurações: idade dos ativos e tempo médio por marca ----------
+    st.divider()
+    st.subheader("Inaugurações: idade dos projetos ativos")
+    st.markdown(
+        "<div class='section-note'>Todos os projetos <b>previstos</b> do tipo Inauguração (qualquer ano). "
+        "Idade = hoje − Passagem de bastão.</div>",
+        unsafe_allow_html=True,
+    )
+    hoje_ref = pd.Timestamp.today().normalize()
+    idade_base = previstos_f[previstos_f["Tipo_norm"] == "INAUGURACAO"].copy()
+    idade_base["Idade (dias)"] = (hoje_ref - idade_base["Passagem de bastão"]).dt.days
+    total_inaug_prev = len(idade_base)
+    idade_base = idade_base[idade_base["Idade (dias)"].notna() & (idade_base["Idade (dias)"] >= 0)].copy()
+    if not idade_base.empty:
+        idade_base = idade_base.sort_values("Idade (dias)")
+        fig = px.bar(
+            idade_base, x="Idade (dias)", y="Restaurante", color="Marca", orientation="h", text="Idade (dias)",
+            hover_data={"Etapa Painel": True, "Responsável": True, "Passagem de bastão": "|%d/%m/%Y"},
+            category_orders={"Restaurante": idade_base["Restaurante"].tolist()},
+        )
+        fig.update_traces(textposition="outside")
+        fig.update_layout(
+            height=max(420, 24 * len(idade_base) + 120), plot_bgcolor="white", paper_bgcolor="white",
+            legend_title_text="", xaxis_title="Dias desde a passagem de bastão", yaxis_title="",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption(
+            f"{len(idade_base)} de {total_inaug_prev} inaugurações previstas têm Passagem de bastão preenchida · "
+            f"idade média: {idade_base['Idade (dias)'].mean():.0f} dias · mais antiga: {int(idade_base['Idade (dias)'].max())} dias."
+        )
+    else:
+        st.plotly_chart(grafico_vazio("Sem inaugurações previstas com Passagem de bastão"), use_container_width=True)
+
+    st.subheader("Inaugurações: tempo médio por marca")
+    st.markdown(
+        "<div class='section-note'>Inaugurações realizadas em 2026 (Data Realizada), independente do ano da passagem de bastão. "
+        "Tempo = Data Realizada − Passagem de bastão.</div>",
+        unsafe_allow_html=True,
+    )
+    tempo_base = real_f[real_f["Tipo_norm"] == "INAUGURACAO"].copy()
+    tempo_base["Tempo Real (dias)"] = pd.to_numeric(tempo_base["Tempo Real (dias)"], errors="coerce")
+    total_inaug_real = len(tempo_base)
+    tempo_base = tempo_base[tempo_base["Tempo Real (dias)"].notna()]
+    if not tempo_base.empty:
+        tm = tempo_base.groupby("Marca")["Tempo Real (dias)"].agg(["mean", "count"]).reset_index()
+        tm["Tempo médio (dias)"] = tm["mean"].round()
+        tm["Rótulo"] = tm.apply(lambda r: f"{r['Tempo médio (dias)']:.0f} dias ({int(r['count'])})", axis=1)
+        tm = tm.sort_values("Tempo médio (dias)")
+        fig = px.bar(tm, x="Marca", y="Tempo médio (dias)", text="Rótulo", category_orders={"Marca": tm["Marca"].tolist()})
+        fig.update_traces(marker_color=ORANGE, textposition="outside")
+        fig.update_layout(height=400, plot_bgcolor="white", paper_bgcolor="white", xaxis_title="", yaxis_title="Dias")
+        st.plotly_chart(fig, use_container_width=True)
+        geral_media = tempo_base["Tempo Real (dias)"].mean()
+        st.caption(
+            f"{len(tempo_base)} de {total_inaug_real} inaugurações realizadas em 2026 têm Passagem de bastão preenchida · "
+            f"média geral: {geral_media:.0f} dias · entre parênteses, a quantidade de projetos de cada marca."
+        )
+    else:
+        st.plotly_chart(grafico_vazio("Sem inaugurações realizadas em 2026 com Passagem de bastão"), use_container_width=True)
+
 # =========================================================
 # RESUMO - Acompanhamento de Aberturas
 # =========================================================
