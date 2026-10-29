@@ -81,33 +81,23 @@ TIPO_COLORS = {
     "Migração": PINK,
 }
 
-# ---- Board Geral (replica a aba Board_geral da planilha) ----
-BOARD_TIPOS = ["INAUGURACAO", "REFORMA", "REPASSE", "MUDANCA DE PONTO", "MIGRACAO", "VIRADA DIGITAL"]
-BOARD_MARCAS = {
+# ---- Resumo de aberturas (Acompanhamento de Aberturas) ----
+RESUMO_ORDEM = [
+    "SPOLETO", "KONI", "CHINA IN BOX", "GENDAI",
+    "PIZZARIA SPOLETO", "ASA ACAI", "2V", "CASA DO PAO DE QUEIJO",
+]
+RESUMO_ROTULOS = {
     "SPOLETO": "Spoleto",
+    "KONI": "Koni",
     "CHINA IN BOX": "China in Box",
     "GENDAI": "Gendai",
-    "KONI": "Koni",
-    "ASA ACAI": "Asa Açaí",
     "PIZZARIA SPOLETO": "Pizzaria Spoleto",
-    "CASA DO PAO DE QUEIJO": "Casa do Pão de Queijo",
+    "ASA ACAI": "Asa Açaí",
     "2V": "2V",
+    "CASA DO PAO DE QUEIJO": "Casa do Pão de Queijo",
 }
-BOARD_FASES = ["PLANEJAMENTO", "EXECUCAO", "FINALIZACAO", "PAUSADO", "AGUARDANDO INICIO"]
-FASE_LABELS = {
-    "PLANEJAMENTO": "Planejamento",
-    "EXECUCAO": "Execução",
-    "FINALIZACAO": "Finalização",
-    "PAUSADO": "Pausado",
-    "AGUARDANDO INICIO": "Aguardando início",
-}
-FASE_COLORS = {
-    "Planejamento": GOLD,
-    "Execução": TEAL,
-    "Finalização": PINK,
-    "Pausado": GRAY,
-    "Aguardando início": BLUE,
-}
+# Nome usado na aba "Inaugurações 2026" -> nome usado na aba Geral
+RESUMO_ALIAS = {"CPQ": "CASA DO PAO DE QUEIJO"}
 
 
 def normalizar_texto(valor):
@@ -245,7 +235,7 @@ def carregar_dados(fonte: str, arquivo_local: str):
     if faltantes:
         raise ValueError(f"Colunas não encontradas na aba Geral: {', '.join(faltantes)}")
 
-    # Copia da base Geral sem transformacoes, usada pela pagina Board Geral.
+    # Copia da base Geral sem transformacoes, usada pela pagina Resumo.
     geral_raw = df.copy()
 
     for c in ["Data Prevista", "Data Realizada", "Passagem de bastão", "Data Contrato"]:
@@ -304,130 +294,120 @@ def carregar_dados(fonte: str, arquivo_local: str):
 
 
 # =========================================================
-# BOARD GERAL - mesmos calculos da aba Board_geral, sobre a aba Geral
+# RESUMO - Acompanhamento de Aberturas (inaugurações por marca)
 # =========================================================
-def calcular_board(geral: pd.DataFrame, mes_ref: int):
-    """Reproduz a aba Board_geral da planilha a partir da aba Geral.
+def calcular_resumo(df_metas: pd.DataFrame, geral: pd.DataFrame, ano: int = ANO):
+    """Tabela "Acompanhamento de Aberturas", calculada a partir da planilha.
 
-    Regras (identicas as formulas COUNTIFS da planilha):
-    - Carteira = Status "PREVISTO".
-    - Marca/Tipo/Responsavel/Etapa comparados sem acento e sem diferenca de caixa.
-    - Em andamento = Total - Pausado - Aguardando inicio.
-    - Realizado 2026/2025 = Status "REALIZADO" com Ano Previsto = 2026/2025.
-    - Mesmo periodo 2025 = Realizado 2025 com Mes Previsto <= mes atual.
+    - Meta 2026: Orçado da aba "Inaugurações 2026".
+    - Inaugurado: aba Geral, Tipo Inauguração, Status Realizado, Ano Previsto = 2026.
+    - Pausados / Não iniciados: Status Previsto com Etapa Pausado ou Aguardando início.
+    - Em andamento para 2026: Previsto, fora de pausados, com ano de referência <= 2026.
+    - Em andamento para 2027: Previsto, fora de pausados, com ano de referência > 2026.
+      Ano de referência = Ano Previsto; se vazio, ano da Data Prevista; se também vazio,
+      projetos em Execução/Finalização contam como 2026 e os demais como 2027.
+    - Projeção 2026 = Inaugurado + Em andamento para 2026; seta = Projeção − Meta.
     """
     g = geral.copy()
     g["_status"] = g["Status"].map(normalizar_texto)
     g["_tipo"] = g["Tipo"].map(normalizar_texto)
     g["_etapa"] = g["Etapa"].map(normalizar_texto)
-    marca = g["Marca"].map(normalizar_texto)
-    g["_marca"] = marca.where(marca.isin(BOARD_MARCAS), "OUTRAS")
+    g["_marca"] = g["Marca"].map(normalizar_texto).replace(RESUMO_ALIAS)
 
-    if "Responsável" in g.columns:
-        resp_orig = g["Responsável"].map(lambda v: "" if pd.isna(v) else str(v).strip())
-    else:
-        resp_orig = pd.Series("", index=g.index)
-    g["_resp"] = resp_orig.map(normalizar_texto).replace({"": "SEM RESPONSAVEL", "?": "SEM RESPONSAVEL"})
-    rotulos_resp = {"SEM RESPONSAVEL": "Sem responsável"}
-    for norm, orig in zip(g["_resp"], resp_orig):
-        if norm not in rotulos_resp and orig:
-            rotulos_resp[norm] = orig
+    ano_prev = pd.to_numeric(g["Ano Previsto"], errors="coerce")
+    data_prev = pd.to_datetime(g["Data Prevista"], errors="coerce")
+    ano_ref = ano_prev.fillna(data_prev.dt.year)
+    sem_ano = ano_ref.isna()
+    em_obra = g["_etapa"].isin(["EXECUCAO", "FINALIZACAO"])
+    ano_ref = ano_ref.mask(sem_ano & em_obra, ano).mask(sem_ano & ~em_obra, ano + 1)
 
-    g["_ano"] = pd.to_numeric(g["Ano Previsto"], errors="coerce") if "Ano Previsto" in g.columns else float("nan")
-    mes_col = "Mês Previsto" if "Mês Previsto" in g.columns else None
-    g["_mes"] = pd.to_numeric(g[mes_col], errors="coerce") if mes_col else float("nan")
+    inaug = g[g["_tipo"] == "INAUGURACAO"]
+    realizadas = inaug[(inaug["_status"] == "REALIZADO") & (ano_prev.loc[inaug.index] == ano)]
+    previstas = inaug[inaug["_status"] == "PREVISTO"]
+    pausa = previstas["_etapa"].isin(["PAUSADO", "AGUARDANDO INICIO"])
+    ref_prev = ano_ref.loc[previstas.index]
+    em_2026 = previstas[~pausa & (ref_prev <= ano)]
+    em_2027 = previstas[~pausa & (ref_prev > ano)]
+    pausadas = previstas[pausa]
 
-    prev = g[(g["_status"] == "PREVISTO") & (g["_tipo"].isin(BOARD_TIPOS))].copy()
-    real = g[(g["_status"] == "REALIZADO") & (g["_tipo"].isin(BOARD_TIPOS))].copy()
-    real26 = real[real["_ano"] == 2026]
-    real25 = real[real["_ano"] == 2025]
-    real25_per = real25[real25["_mes"] <= mes_ref]
+    metas = df_metas.copy()
+    metas["_marca"] = metas["Marca"].map(normalizar_texto).replace(RESUMO_ALIAS)
+    meta_por_marca = metas.groupby("_marca")["Meta"].sum()
 
-    # Responsaveis: os que possuem carteira ativa, do maior para o menor.
-    resp_ordem = prev["_resp"].value_counts().index.tolist()
-
-    # ---------- KPIs ----------
-    kpis = {"TOTAL": len(prev)}
-    for t in BOARD_TIPOS:
-        kpis[t] = int((prev["_tipo"] == t).sum())
-
-    # ---------- Tabela 1: Responsavel x Tipo x Marca ----------
-    cols_marca = list(BOARD_MARCAS.items())
-    if (prev["_marca"] == "OUTRAS").any():
-        cols_marca.append(("OUTRAS", "Outras marcas"))
+    chaves = list(RESUMO_ORDEM)
+    extras = set(realizadas["_marca"]) | set(previstas["_marca"]) | set(meta_por_marca.index)
+    chaves += sorted(m for m in extras if m and m not in chaves)
 
     linhas = []
-    for r in resp_ordem:
-        for t in BOARD_TIPOS:
-            sub = prev[(prev["_resp"] == r) & (prev["_tipo"] == t)]
-            if sub.empty:
-                continue
-            linha = {"Responsável": rotulos_resp.get(r, r), "Tipo": TIPO_LABELS[t]}
-            for chave, rotulo in cols_marca:
-                linha[rotulo] = int((sub["_marca"] == chave).sum())
-            total = len(sub)
-            pausado = int((sub["_etapa"] == "PAUSADO").sum())
-            aguard = int((sub["_etapa"] == "AGUARDANDO INICIO").sum())
-            linha["Total"] = total
-            linha["Pausado"] = pausado
-            linha["Aguardando início"] = aguard
-            linha["Em andamento"] = total - pausado - aguard
-            linhas.append(linha)
-    tab_marca = pd.DataFrame(linhas)
-    if not tab_marca.empty:
-        tot = {"Responsável": "TOTAL", "Tipo": ""}
-        for c in tab_marca.columns[2:]:
-            tot[c] = int(tab_marca[c].sum())
-        tab_marca = pd.concat([tab_marca, pd.DataFrame([tot])], ignore_index=True)
+    for k in chaves:
+        meta = int(meta_por_marca.get(k, 0))
+        ina = int((realizadas["_marca"] == k).sum())
+        a26 = int((em_2026["_marca"] == k).sum())
+        pau = int((pausadas["_marca"] == k).sum())
+        a27 = int((em_2027["_marca"] == k).sum())
+        if k not in RESUMO_ORDEM and not any([meta, ina, a26, pau, a27]):
+            continue
+        proj = ina + a26
+        linhas.append({
+            "Marca": RESUMO_ROTULOS.get(k, k.title()),
+            "Meta 2026": meta, "Inaugurado": ina, "Em andamento 2026": a26,
+            "Pausados / Não iniciados": pau, "Em andamento 2027": a27,
+            "Projeção 2026": proj, "Δ": proj - meta,
+        })
+    tabela = pd.DataFrame(linhas)
+    total = {"Marca": "TOTAL 2026"}
+    for c in tabela.columns[1:]:
+        total[c] = int(tabela[c].sum())
+    return tabela, total
 
-    # ---------- Tabela 2: Responsavel x Fase x Tipo ----------
-    linhas = []
-    for r in resp_ordem:
-        for fase in BOARD_FASES + ["REALIZADO 2026"]:
-            linha = {"Responsável": rotulos_resp.get(r, r),
-                     "Fase": FASE_LABELS.get(fase, "Realizado 2026")}
-            for t in BOARD_TIPOS:
-                if fase == "REALIZADO 2026":
-                    n = int(((real26["_resp"] == r) & (real26["_tipo"] == t)).sum())
-                else:
-                    n = int(((prev["_resp"] == r) & (prev["_tipo"] == t) & (prev["_etapa"] == fase)).sum())
-                linha[TIPO_LABELS[t]] = n
-            linhas.append(linha)
-    tab_fase = pd.DataFrame(linhas)
-    cols_tipo = [TIPO_LABELS[t] for t in BOARD_TIPOS]
-    tab_fase["Total"] = tab_fase[cols_tipo].sum(axis=1)
 
-    # ---------- Resumo por tipo ----------
-    def por_tipo(df_, filtro=None):
-        base = df_ if filtro is None else df_[filtro(df_)]
-        return [int((base["_tipo"] == t).sum()) for t in BOARD_TIPOS]
+def html_resumo(tabela: pd.DataFrame, total: dict) -> str:
+    """Monta a tabela "Acompanhamento de Aberturas" em HTML."""
+    colunas = [
+        ("Meta 2026", "🎯", "Meta 2026", "#0B1B4D", "#0B1B4D"),
+        ("Inaugurado", "🚀", "Inaugurado", "#1FA64A", "#1B8A3E"),
+        ("Em andamento 2026", "⏳", "Em Andamento<br>para 2026", "#F5A800", "#E69A00"),
+        ("Pausados / Não iniciados", "⏸", "Pausados / Não<br>iniciados", "#E8481F", "#D8321A"),
+        ("Em andamento 2027", "📈", "Em Andamento<br>para 2027", "#2D5BFF", "#2D5BFF"),
+        ("Projeção 2026", "📊", "Projeção 2026", "#3A3F5C", "#2B2F45"),
+    ]
 
-    em_andamento = por_tipo(prev, lambda d: d["_etapa"].isin(["PLANEJAMENTO", "EXECUCAO", "FINALIZACAO"]))
-    pausados = por_tipo(prev, lambda d: d["_etapa"].isin(["PAUSADO", "AGUARDANDO INICIO"]))
-    r26 = por_tipo(real26)
-    r25 = por_tipo(real25)
-    r25p = por_tipo(real25_per)
-    total_tipo = [a + b + c for a, b, c in zip(em_andamento, pausados, r26)]
-    delta = [a - b for a, b in zip(r26, r25p)]
+    def seta(delta):
+        if delta > 0:
+            return f"<span style='color:#1B8A3E;font-weight:800;margin-left:8px;'>▲ +{delta}</span>"
+        if delta < 0:
+            return f"<span style='color:#D8321A;font-weight:800;margin-left:8px;'>▼ {delta}</span>"
+        return "<span style='color:#F5A800;font-weight:800;margin-left:8px;'>—</span>"
 
-    resumo = pd.DataFrame(
-        [total_tipo, em_andamento, pausados, r26, r25, r25p, delta],
-        index=["Total (carteira + realizado 2026)", "Total em andamento", "Total pausados / não iniciados",
-               "Total realizado 2026", "Realizado 2025", f"Realizado mesmo período/2025 (até mês {mes_ref})",
-               "Δ mesmo período (2026 − 2025)"],
-        columns=cols_tipo,
+    th = "<th></th>" + "".join(
+        f"<th style='padding:0 5px;'><div style='font-size:20px;text-align:center;'>{ico}</div>"
+        f"<div style='background:{cor};color:white;border-radius:10px 10px 0 0;padding:10px 6px;"
+        f"font-size:13px;font-weight:800;text-align:center;line-height:1.2;'>{rot}</div></th>"
+        for _, ico, rot, cor, _ in colunas
     )
-    resumo["Total"] = resumo.sum(axis=1)
-    resumo = resumo.reset_index().rename(columns={"index": "Indicador"})
 
-    return {
-        "kpis": kpis,
-        "tab_marca": tab_marca,
-        "tab_fase": tab_fase,
-        "resumo": resumo,
-        "cols_tipo": cols_tipo,
-        "resp_ordem": [rotulos_resp.get(r, r) for r in resp_ordem],
-    }
+    def linha(reg, eh_total=False):
+        rotulo_bg = "background:#0B1B4D;color:white;" if eh_total else "background:white;color:#222;"
+        celulas = (
+            f"<td style='padding:12px 14px;font-weight:800;font-size:14px;border-radius:12px 0 0 12px;"
+            f"{rotulo_bg}white-space:nowrap;'>{reg['Marca']}</td>"
+        )
+        for nome, _, _, _, cor_txt in colunas:
+            valor = reg[nome]
+            extra = seta(reg["Δ"]) if nome == "Projeção 2026" else ""
+            cor = "#222" if nome in ("Meta 2026", "Projeção 2026") else cor_txt
+            celulas += (
+                f"<td style='background:white;text-align:center;padding:12px 6px;font-size:17px;"
+                f"font-weight:800;color:{cor};'>{valor}{extra}</td>"
+            )
+        return f"<tr style='box-shadow:0 1px 6px rgba(0,0,0,.08);'>{celulas}</tr>"
+
+    corpo = "".join(linha(r) for r in tabela.to_dict("records")) + linha(total, eh_total=True)
+    return (
+        "<div style='overflow-x:auto;'>"
+        "<table style='width:100%;border-collapse:separate;border-spacing:0 6px;min-width:860px;'>"
+        f"<thead><tr>{th}</tr></thead><tbody>{corpo}</tbody></table></div>"
+    )
 
 
 def card_html(titulo, valor, subtitulo, cor):
@@ -448,13 +428,6 @@ def grafico_vazio(texto):
     fig.update_yaxes(visible=False)
     fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10), paper_bgcolor="white", plot_bgcolor="white")
     return fig
-
-
-def destacar_total(linha):
-    """Realca linhas de total nas tabelas do Board Geral."""
-    if str(linha.iloc[0]).upper().startswith("TOTAL"):
-        return ["font-weight:700;background-color:#FFF0E1"] * len(linha)
-    return [""] * len(linha)
 
 
 # =========================================================
@@ -486,7 +459,7 @@ with head_title:
     <div style="background:{ORANGE};padding:18px 24px;border-radius:18px;margin-bottom:8px;">
       <div style="font-size:13px;color:white;font-weight:700;letter-spacing:1.2px;">PRÉ-OP | GESTÃO DE PROJETOS</div>
       <div style="font-size:32px;color:white;font-weight:800;">Dashboard de Projetos 2026</div>
-      <div style="font-size:14px;color:white;opacity:.92;">Metas, carteira, risco, prazos e Board Geral por responsável</div>
+      <div style="font-size:14px;color:white;opacity:.92;">Metas, carteira, risco, prazos e acompanhamento de aberturas</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -528,7 +501,7 @@ tipos_disponiveis = [TIPO_LABELS[t] for t in TIPOS_PROJETO]
 with st.sidebar:
     st.divider()
     st.header("Filtros")
-    st.caption("Os filtros valem para todas as páginas, exceto o Board Geral, que usa a base completa da aba Geral.")
+    st.caption("Os filtros valem para todas as páginas, exceto a página Resumo, que usa a base completa.")
     marcas_filtro = st.multiselect("Marca", marcas_disponiveis, default=marcas_disponiveis)
     tipos_filtro = st.multiselect("Tipo de projeto", tipos_disponiveis, default=tipos_disponiveis)
     responsaveis = sorted(ativos["Responsável"].dropna().astype(str).unique()) if "Responsável" in ativos else []
@@ -544,8 +517,8 @@ if responsaveis:
 # =========================================================
 # ABAS
 # =========================================================
-tab_exec, tab_oper, tab_prazos, tab_board, tab_detalhe = st.tabs([
-    "Visão Executiva", "Visão Operacional", "Gestão de Prazos", "Board Geral", "Detalhamento"
+tab_exec, tab_oper, tab_prazos, tab_resumo, tab_detalhe = st.tabs([
+    "Visão Executiva", "Visão Operacional", "Gestão de Prazos", "Resumo", "Detalhamento"
 ])
 
 # =========================================================
@@ -776,93 +749,22 @@ with tab_prazos:
     st.plotly_chart(fig, use_container_width=True)
 
 # =========================================================
-# BOARD GERAL - replica da aba Board_geral, calculada sobre a aba Geral
+# RESUMO - Acompanhamento de Aberturas
 # =========================================================
-with tab_board:
-    mes_ref = datetime.now().month
-    board = calcular_board(geral_raw, mes_ref)
-    kpis = board["kpis"]
-
-    st.subheader("Board Geral")
+with tab_resumo:
+    st.subheader("Acompanhamento de Aberturas")
+    tabela_resumo, total_resumo = calcular_resumo(df_metas, geral_raw)
+    st.markdown(html_resumo(tabela_resumo, total_resumo), unsafe_allow_html=True)
     st.markdown(
-        "<div class='section-note'>Mesma lógica da aba Board_geral da planilha, calculada sobre a aba Geral: "
-        "carteira = Status <b>Previsto</b>; Em andamento = Total − Pausado − Aguardando início; "
-        f"Realizado 2025/2026 pelo Ano Previsto; mesmo período = Mês Previsto ≤ {mes_ref} (mês atual). "
-        "Esta página não usa os filtros da barra lateral.</div>",
+        "<div class='section-note' style='margin-top:10px;'>"
+        "<b>Como é calculado</b> (inaugurações, aba Geral): <b>Meta 2026</b> = orçado da aba Inaugurações 2026 · "
+        "<b>Inaugurado</b> = realizadas com Ano Previsto 2026 · "
+        "<b>Pausados / Não iniciados</b> = previstas com etapa Pausado ou Aguardando início · "
+        "<b>Em andamento 2026 / 2027</b> = demais previstas, pelo ano previsto (sem ano: em Execução/Finalização contam como 2026, "
+        "as outras como 2027) · <b>Projeção 2026</b> = Inaugurado + Em andamento 2026 · seta = Projeção − Meta. "
+        "Esta página não usa os filtros da barra lateral."
+        "</div>",
         unsafe_allow_html=True,
-    )
-
-    # ---- Cards: total e por tipo ----
-    cards = st.columns(7)
-    with cards[0]:
-        st.markdown(card_html("EM ANDAMENTO", kpis["TOTAL"], "total de projetos previstos", DARK), unsafe_allow_html=True)
-    for col, t in zip(cards[1:], BOARD_TIPOS):
-        rotulo = TIPO_LABELS[t]
-        with col:
-            st.markdown(card_html(rotulo.upper(), kpis[t], "previstos", TIPO_COLORS[rotulo]), unsafe_allow_html=True)
-
-    # ---- Tabela 1: responsavel x tipo x marca ----
-    st.write("")
-    st.subheader("Carteira por responsável, tipo e marca")
-    st.markdown("<div class='section-note'>Linhas sem projetos foram ocultadas.</div>", unsafe_allow_html=True)
-    if board["tab_marca"].empty:
-        st.info("Sem projetos previstos na aba Geral.")
-    else:
-        st.dataframe(
-            board["tab_marca"].style.apply(destacar_total, axis=1),
-            use_container_width=True, hide_index=True,
-            height=min(38 * (len(board["tab_marca"]) + 1) + 3, 760),
-        )
-
-    # ---- Graficos ----
-    tab_fase = board["tab_fase"]
-    cols_tipo = board["cols_tipo"]
-    g1, g2 = st.columns(2)
-    with g1:
-        st.subheader("Fases da carteira por responsável")
-        fase_plot = tab_fase[tab_fase["Fase"] != "Realizado 2026"].groupby(["Responsável", "Fase"], sort=False)["Total"].sum().reset_index()
-        fase_plot = fase_plot[fase_plot["Total"] > 0]
-        if not fase_plot.empty:
-            fig = px.bar(
-                fase_plot, x="Responsável", y="Total", color="Fase", barmode="stack", text_auto=True,
-                category_orders={"Responsável": board["resp_ordem"], "Fase": [FASE_LABELS[f] for f in BOARD_FASES]},
-                color_discrete_map=FASE_COLORS,
-            )
-            fig.update_layout(height=400, plot_bgcolor="white", paper_bgcolor="white", legend_title_text="", xaxis_title="", yaxis_title="Projetos")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.plotly_chart(grafico_vazio("Sem projetos previstos"), use_container_width=True)
-
-    with g2:
-        st.subheader("Realizado 2026 x mesmo período de 2025")
-        resumo = board["resumo"]
-        lin_26 = resumo[resumo["Indicador"] == "Total realizado 2026"].iloc[0]
-        lin_25 = resumo[resumo["Indicador"].str.startswith("Realizado mesmo período")].iloc[0]
-        comp = pd.DataFrame({
-            "Tipo": cols_tipo * 2,
-            "Período": ["2026"] * len(cols_tipo) + ["Mesmo período 2025"] * len(cols_tipo),
-            "Quantidade": [int(lin_26[c]) for c in cols_tipo] + [int(lin_25[c]) for c in cols_tipo],
-        })
-        fig = px.bar(
-            comp, x="Tipo", y="Quantidade", color="Período", barmode="group", text_auto=True,
-            color_discrete_map={"2026": ORANGE, "Mesmo período 2025": "#C9C9C9"},
-            category_orders={"Tipo": cols_tipo},
-        )
-        fig.update_layout(height=400, plot_bgcolor="white", paper_bgcolor="white", legend_title_text="", xaxis_title="", yaxis_title="Projetos")
-        fig.update_traces(textposition="outside")
-        st.plotly_chart(fig, use_container_width=True)
-
-    # ---- Tabela 2: responsavel x fase x tipo ----
-    st.subheader("Tipo e fase por responsável")
-    st.dataframe(
-        tab_fase, use_container_width=True, hide_index=True,
-        height=min(38 * (len(tab_fase) + 1) + 3, 760),
-    )
-
-    # ---- Resumo total ----
-    st.subheader("Totais e comparativo com 2025")
-    st.dataframe(
-        board["resumo"], use_container_width=True, hide_index=True,
     )
 
 # =========================================================
