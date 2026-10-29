@@ -2,8 +2,6 @@ from pathlib import Path
 from io import BytesIO
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 import unicodedata
-import re
-import time
 from datetime import datetime
 
 import pandas as pd
@@ -18,14 +16,14 @@ from streamlit_autorefresh import st_autorefresh
 # =========================================================
 st.set_page_config(page_title="Dashboard Pre-Op 2026", page_icon="📊", layout="wide")
 
-# Atualiza a pagina automaticamente a cada 5 minutos.
-st_autorefresh(interval=5 * 60 * 1000, key="atualizacao_automatica")
+# Atualiza a pagina automaticamente a cada 1 hora.
+INTERVALO_ATUALIZACAO_SEG = 60 * 60
+st_autorefresh(interval=INTERVALO_ATUALIZACAO_SEG * 1000, key="atualizacao_automatica")
 
 SHAREPOINT_URL = "https://trigogrupo-my.sharepoint.com/:x:/g/personal/isabel_mendes_grupotrigo_com_br/IQBQBfuaDt2BRZ3DnDhUAB64AXlXAjiIByO_jURmo2U7syo?e=k04bNY"
 ARQUIVO_PADRAO = "PROJETOS PREOP 2026 - DASH.xlsx"
 ABA_METAS = "Inaugurações 2026"
 ABA_GERAL = "Geral"
-ABA_RADAR = "radar"
 LOGO_ARQUIVO = "trigo_logo.webp"
 META_PERCENTUAL = 0.80
 ANO = 2026
@@ -83,6 +81,34 @@ TIPO_COLORS = {
     "Migração": PINK,
 }
 
+# ---- Board Geral (replica a aba Board_geral da planilha) ----
+BOARD_TIPOS = ["INAUGURACAO", "REFORMA", "REPASSE", "MUDANCA DE PONTO", "MIGRACAO", "VIRADA DIGITAL"]
+BOARD_MARCAS = {
+    "SPOLETO": "Spoleto",
+    "CHINA IN BOX": "China in Box",
+    "GENDAI": "Gendai",
+    "KONI": "Koni",
+    "ASA ACAI": "Asa Açaí",
+    "PIZZARIA SPOLETO": "Pizzaria Spoleto",
+    "CASA DO PAO DE QUEIJO": "Casa do Pão de Queijo",
+    "2V": "2V",
+}
+BOARD_FASES = ["PLANEJAMENTO", "EXECUCAO", "FINALIZACAO", "PAUSADO", "AGUARDANDO INICIO"]
+FASE_LABELS = {
+    "PLANEJAMENTO": "Planejamento",
+    "EXECUCAO": "Execução",
+    "FINALIZACAO": "Finalização",
+    "PAUSADO": "Pausado",
+    "AGUARDANDO INICIO": "Aguardando início",
+}
+FASE_COLORS = {
+    "Planejamento": GOLD,
+    "Execução": TEAL,
+    "Finalização": PINK,
+    "Pausado": GRAY,
+    "Aguardando início": BLUE,
+}
+
 
 def normalizar_texto(valor):
     if pd.isna(valor):
@@ -110,7 +136,7 @@ def url_download_sharepoint(url: str) -> str:
     return urlunparse((p.scheme, p.netloc, p.path, p.params, urlencode(query), p.fragment))
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=INTERVALO_ATUALIZACAO_SEG, show_spinner=False)
 def baixar_sharepoint(url: str):
     """Tenta baixar a planilha diretamente do link compartilhado.
 
@@ -137,9 +163,9 @@ def baixar_sharepoint(url: str):
     return conteudo
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=INTERVALO_ATUALIZACAO_SEG, show_spinner=False)
 def carregar_excel(fonte: str, arquivo_local: str):
-    """Retorna ExcelFile/bytes + descricao da fonte efetivamente usada."""
+    """Retorna bytes do XLSX + descricao da fonte efetivamente usada."""
     if fonte == "SharePoint":
         try:
             conteudo = baixar_sharepoint(SHAREPOINT_URL)
@@ -156,182 +182,7 @@ def carregar_excel(fonte: str, arquivo_local: str):
     return caminho.read_bytes(), "Arquivo local", None
 
 
-def encontrar_coluna(df, candidatos):
-    """Encontra uma coluna por nomes alternativos, ignorando acentos/caixa."""
-    mapa = {normalizar_texto(c): c for c in df.columns}
-    for candidato in candidatos:
-        chave = normalizar_texto(candidato)
-        if chave in mapa:
-            return mapa[chave]
-    # aceita correspondencia parcial apenas quando inequívoca
-    for candidato in candidatos:
-        chave = normalizar_texto(candidato)
-        achadas = [orig for norm, orig in mapa.items() if chave in norm or norm in chave]
-        if len(achadas) == 1:
-            return achadas[0]
-    return None
-
-
-def chave_unidade(valor):
-    """Normaliza o nome da unidade para cruzamento entre Geral e Radar."""
-    txt = normalizar_texto(valor)
-    for termo in ["RESTAURANTE", "UNIDADE", "LOJA"]:
-        if txt.startswith(termo + " "):
-            txt = txt[len(termo):].strip()
-    return " ".join(txt.split())
-
-
-def classificar_urgencia(valor):
-    """Padroniza o sinal de urgência informado na aba Radar sem alterar o valor original."""
-    txt = normalizar_texto(valor)
-    if not txt:
-        return "SEM SINAL"
-    if any(t in txt for t in ["CRITICO", "CRITICA", "URGENTE", "VERMELHO", "ALTO", "ALTA", "PRIORIDADE 1", "P1"]):
-        return "🔴 CRÍTICO"
-    if any(t in txt for t in ["ATENCAO", "AMARELO", "MEDIO", "MEDIA", "PRIORIDADE 2", "P2"]):
-        return "🟡 ATENÇÃO"
-    if any(t in txt for t in ["VERDE", "BAIXO", "BAIXA", "NORMAL", "OK", "PRIORIDADE 3", "P3"]):
-        return "🟢 ACOMPANHAR"
-    return str(valor).strip()
-
-
-
-
-
-def identificar_sinal_radar(texto):
-    """Extrai o sinal do início/trecho da coluna Loja / status."""
-    bruto = str(texto or "").strip()
-    txt = normalizar_texto(bruto)
-
-    if "🔴" in bruto or "VERMELH" in txt or "CRITIC" in txt or "URGENT" in txt:
-        return "🔴 CRÍTICO"
-    if "🟡" in bruto or "⚠" in bruto or "AMAREL" in txt or "ATENCAO" in txt:
-        return "🟡 ATENÇÃO"
-    if "🟢" in bruto or "VERDE" in txt or "ACOMPANHAR" in txt or txt.strip() == "OK":
-        return "🟢 ACOMPANHAR"
-    return "SEM SINAL"
-
-
-def carregar_radar(conteudo):
-    """Lê a aba Radar/Farol como tabela estruturada.
-
-    Estrutura esperada:
-        Marca | Modelo | Loja / status
-
-    Cada linha válida vira um registro. Não há inferência por blocos.
-    """
-    xls = pd.ExcelFile(BytesIO(conteudo), engine="openpyxl")
-    aba = next(
-        (s for s in xls.sheet_names if normalizar_texto(s) in {"RADAR", "FAROL"}),
-        None
-    )
-    if not aba:
-        return pd.DataFrame(
-            columns=["Texto Radar", "Marca Radar", "Sinal Radar", "Tipo Radar", "Linha Radar"]
-        ), {"disponivel": False, "motivo": "Aba 'radar' ou 'farol' não encontrada."}
-
-    df = pd.read_excel(BytesIO(conteudo), sheet_name=aba, engine="openpyxl")
-    df.columns = [str(c).strip() for c in df.columns]
-
-    # Localiza as 3 colunas por nomes equivalentes.
-    col_marca = next(
-        (c for c in df.columns if normalizar_texto(c) in {"MARCA", "BRAND"}),
-        None
-    )
-    col_modelo = next(
-        (c for c in df.columns if normalizar_texto(c) in {"MODELO", "TIPO", "TIPO DE PROJETO", "MODELO DE PROJETO"}),
-        None
-    )
-    col_texto = next(
-        (c for c in df.columns if normalizar_texto(c) in {
-            "LOJA / STATUS", "LOJA/STATUS", "LOJA STATUS", "UNIDADE / STATUS",
-            "UNIDADE/STATUS", "UNIDADE STATUS", "STATUS DA LOJA", "LOJA", "UNIDADE"
-        }),
-        None
-    )
-
-    if not all([col_marca, col_modelo, col_texto]):
-        return pd.DataFrame(
-            columns=["Texto Radar", "Marca Radar", "Sinal Radar", "Tipo Radar", "Linha Radar"]
-        ), {
-            "disponivel": True,
-            "aba": aba,
-            "linhas": 0,
-            "motivo": (
-                "Não encontrei as colunas Marca, Modelo e Loja / status na aba Radar/Farol. "
-                f"Colunas encontradas: {', '.join(map(str, df.columns))}"
-            ),
-        }
-
-    radar = df[[col_marca, col_modelo, col_texto]].copy()
-    radar.columns = ["Marca Radar", "Tipo Radar", "Texto Radar"]
-
-    # Limpa linhas vazias.
-    radar = radar.dropna(subset=["Marca Radar", "Tipo Radar", "Texto Radar"], how="any").copy()
-    radar["Marca Radar"] = radar["Marca Radar"].astype(str).str.strip()
-    radar["Tipo Radar"] = radar["Tipo Radar"].astype(str).str.strip()
-    radar["Texto Radar"] = radar["Texto Radar"].astype(str).str.strip()
-
-    # Remove linhas sem conteúdo efetivo.
-    radar = radar[
-        (radar["Marca Radar"] != "") &
-        (radar["Tipo Radar"] != "") &
-        (radar["Texto Radar"] != "")
-    ].copy()
-
-    # Padroniza marcas sem eliminar marcas válidas.
-    def padronizar_marca(valor):
-        n = normalizar_texto(valor)
-        mapa = {
-            "CIB": "CHINA IN BOX",
-            "CHINA IN BOX": "CHINA IN BOX",
-            "CPQ": "CASA DO PÃO DE QUEIJO",
-            "CASA DO PAO DE QUEIJO": "CASA DO PÃO DE QUEIJO",
-            "ASA": "ASA AÇAÍ",
-            "ASA ACAI": "ASA AÇAÍ",
-            "SPOLETO": "SPOLETO",
-            "PIZZARIA SPOLETO": "PIZZARIA SPOLETO",
-            "GENDAI": "GENDAI",
-            "KONI": "KONI",
-            "2V": "2V",
-            "2V RJ": "2V",
-        }
-        return mapa.get(n, str(valor).strip())
-
-    def padronizar_tipo(valor):
-        n = normalizar_texto(valor)
-        if "INAUGUR" in n or "IMPLANT" in n:
-            return "Inauguração"
-        if "REFORMA" in n:
-            return "Reforma"
-        if "REPASSE" in n:
-            return "Repasse"
-        if "VIRADA DIGITAL" in n:
-            return "Virada Digital"
-        if "MUDANCA DE PONTO" in n:
-            return "Mudança de Ponto"
-        if "MIGRACAO" in n:
-            return "Migração"
-        return str(valor).strip()
-
-    radar["Marca Radar"] = radar["Marca Radar"].map(padronizar_marca)
-    radar["Tipo Radar"] = radar["Tipo Radar"].map(padronizar_tipo)
-    radar["Sinal Radar"] = radar["Texto Radar"].map(identificar_sinal_radar)
-    radar["Linha Radar"] = radar.index + 2
-
-    radar = radar.drop_duplicates(
-        subset=["Marca Radar", "Tipo Radar", "Texto Radar"]
-    ).reset_index(drop=True)
-
-    return radar, {
-        "disponivel": True,
-        "aba": aba,
-        "linhas": len(radar),
-        "motivo": None,
-    }
-
-
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=INTERVALO_ATUALIZACAO_SEG, show_spinner=False)
 def carregar_dados(fonte: str, arquivo_local: str):
     conteudo, fonte_usada, aviso_fonte = carregar_excel(fonte, arquivo_local)
 
@@ -394,10 +245,13 @@ def carregar_dados(fonte: str, arquivo_local: str):
     if faltantes:
         raise ValueError(f"Colunas não encontradas na aba Geral: {', '.join(faltantes)}")
 
+    # Copia da base Geral sem transformacoes, usada pela pagina Board Geral.
+    geral_raw = df.copy()
+
     for c in ["Data Prevista", "Data Realizada", "Passagem de bastão", "Data Contrato"]:
         df[c] = pd.to_datetime(df[c], errors="coerce")
 
-    for c in ["Status", "Tipo", "Etapa", "Risco", "Capex", "Status Rational", "Marca", "Responsável"]:
+    for c in ["Status", "Tipo", "Etapa", "Risco", "Marca", "Responsável"]:
         if c in df.columns:
             df[f"{c}_norm"] = df[c].map(normalizar_texto)
 
@@ -441,17 +295,139 @@ def carregar_dados(fonte: str, arquivo_local: str):
     # Inauguracoes realizadas - mantidas para comparar com meta.
     inauguracoes_realizadas = realizados_tipos[realizados_tipos["Tipo_norm"] == "INAUGURACAO"].copy()
 
-    # ---------- RADAR: quadro textual da mesma pasta de trabalho ----------
-    # A aba Radar não é tratada como uma tabela Unidade x Status; os textos são
-    # preservados e agrupados por marca, sinal e tipo de projeto.
-    radar_base, info_radar = carregar_radar(conteudo)
-
     totais_oficiais = {
         "Meta": total_oficial_meta if total_oficial_meta is not None else int(df_metas["Meta"].sum()),
         "Realizado": total_oficial_realizado if total_oficial_realizado is not None else int(df_metas["Realizado"].sum()),
     }
 
-    return df_metas, ativos, realizados_tipos, inauguracoes_realizadas, totais_oficiais, radar_base, info_radar, fonte_usada, aviso_fonte
+    return df_metas, ativos, realizados_tipos, inauguracoes_realizadas, totais_oficiais, geral_raw, fonte_usada, aviso_fonte
+
+
+# =========================================================
+# BOARD GERAL - mesmos calculos da aba Board_geral, sobre a aba Geral
+# =========================================================
+def calcular_board(geral: pd.DataFrame, mes_ref: int):
+    """Reproduz a aba Board_geral da planilha a partir da aba Geral.
+
+    Regras (identicas as formulas COUNTIFS da planilha):
+    - Carteira = Status "PREVISTO".
+    - Marca/Tipo/Responsavel/Etapa comparados sem acento e sem diferenca de caixa.
+    - Em andamento = Total - Pausado - Aguardando inicio.
+    - Realizado 2026/2025 = Status "REALIZADO" com Ano Previsto = 2026/2025.
+    - Mesmo periodo 2025 = Realizado 2025 com Mes Previsto <= mes atual.
+    """
+    g = geral.copy()
+    g["_status"] = g["Status"].map(normalizar_texto)
+    g["_tipo"] = g["Tipo"].map(normalizar_texto)
+    g["_etapa"] = g["Etapa"].map(normalizar_texto)
+    marca = g["Marca"].map(normalizar_texto)
+    g["_marca"] = marca.where(marca.isin(BOARD_MARCAS), "OUTRAS")
+
+    if "Responsável" in g.columns:
+        resp_orig = g["Responsável"].map(lambda v: "" if pd.isna(v) else str(v).strip())
+    else:
+        resp_orig = pd.Series("", index=g.index)
+    g["_resp"] = resp_orig.map(normalizar_texto).replace({"": "SEM RESPONSAVEL", "?": "SEM RESPONSAVEL"})
+    rotulos_resp = {"SEM RESPONSAVEL": "Sem responsável"}
+    for norm, orig in zip(g["_resp"], resp_orig):
+        if norm not in rotulos_resp and orig:
+            rotulos_resp[norm] = orig
+
+    g["_ano"] = pd.to_numeric(g["Ano Previsto"], errors="coerce") if "Ano Previsto" in g.columns else float("nan")
+    mes_col = "Mês Previsto" if "Mês Previsto" in g.columns else None
+    g["_mes"] = pd.to_numeric(g[mes_col], errors="coerce") if mes_col else float("nan")
+
+    prev = g[(g["_status"] == "PREVISTO") & (g["_tipo"].isin(BOARD_TIPOS))].copy()
+    real = g[(g["_status"] == "REALIZADO") & (g["_tipo"].isin(BOARD_TIPOS))].copy()
+    real26 = real[real["_ano"] == 2026]
+    real25 = real[real["_ano"] == 2025]
+    real25_per = real25[real25["_mes"] <= mes_ref]
+
+    # Responsaveis: os que possuem carteira ativa, do maior para o menor.
+    resp_ordem = prev["_resp"].value_counts().index.tolist()
+
+    # ---------- KPIs ----------
+    kpis = {"TOTAL": len(prev)}
+    for t in BOARD_TIPOS:
+        kpis[t] = int((prev["_tipo"] == t).sum())
+
+    # ---------- Tabela 1: Responsavel x Tipo x Marca ----------
+    cols_marca = list(BOARD_MARCAS.items())
+    if (prev["_marca"] == "OUTRAS").any():
+        cols_marca.append(("OUTRAS", "Outras marcas"))
+
+    linhas = []
+    for r in resp_ordem:
+        for t in BOARD_TIPOS:
+            sub = prev[(prev["_resp"] == r) & (prev["_tipo"] == t)]
+            if sub.empty:
+                continue
+            linha = {"Responsável": rotulos_resp.get(r, r), "Tipo": TIPO_LABELS[t]}
+            for chave, rotulo in cols_marca:
+                linha[rotulo] = int((sub["_marca"] == chave).sum())
+            total = len(sub)
+            pausado = int((sub["_etapa"] == "PAUSADO").sum())
+            aguard = int((sub["_etapa"] == "AGUARDANDO INICIO").sum())
+            linha["Total"] = total
+            linha["Pausado"] = pausado
+            linha["Aguardando início"] = aguard
+            linha["Em andamento"] = total - pausado - aguard
+            linhas.append(linha)
+    tab_marca = pd.DataFrame(linhas)
+    if not tab_marca.empty:
+        tot = {"Responsável": "TOTAL", "Tipo": ""}
+        for c in tab_marca.columns[2:]:
+            tot[c] = int(tab_marca[c].sum())
+        tab_marca = pd.concat([tab_marca, pd.DataFrame([tot])], ignore_index=True)
+
+    # ---------- Tabela 2: Responsavel x Fase x Tipo ----------
+    linhas = []
+    for r in resp_ordem:
+        for fase in BOARD_FASES + ["REALIZADO 2026"]:
+            linha = {"Responsável": rotulos_resp.get(r, r),
+                     "Fase": FASE_LABELS.get(fase, "Realizado 2026")}
+            for t in BOARD_TIPOS:
+                if fase == "REALIZADO 2026":
+                    n = int(((real26["_resp"] == r) & (real26["_tipo"] == t)).sum())
+                else:
+                    n = int(((prev["_resp"] == r) & (prev["_tipo"] == t) & (prev["_etapa"] == fase)).sum())
+                linha[TIPO_LABELS[t]] = n
+            linhas.append(linha)
+    tab_fase = pd.DataFrame(linhas)
+    cols_tipo = [TIPO_LABELS[t] for t in BOARD_TIPOS]
+    tab_fase["Total"] = tab_fase[cols_tipo].sum(axis=1)
+
+    # ---------- Resumo por tipo ----------
+    def por_tipo(df_, filtro=None):
+        base = df_ if filtro is None else df_[filtro(df_)]
+        return [int((base["_tipo"] == t).sum()) for t in BOARD_TIPOS]
+
+    em_andamento = por_tipo(prev, lambda d: d["_etapa"].isin(["PLANEJAMENTO", "EXECUCAO", "FINALIZACAO"]))
+    pausados = por_tipo(prev, lambda d: d["_etapa"].isin(["PAUSADO", "AGUARDANDO INICIO"]))
+    r26 = por_tipo(real26)
+    r25 = por_tipo(real25)
+    r25p = por_tipo(real25_per)
+    total_tipo = [a + b + c for a, b, c in zip(em_andamento, pausados, r26)]
+    delta = [a - b for a, b in zip(r26, r25p)]
+
+    resumo = pd.DataFrame(
+        [total_tipo, em_andamento, pausados, r26, r25, r25p, delta],
+        index=["Total (carteira + realizado 2026)", "Total em andamento", "Total pausados / não iniciados",
+               "Total realizado 2026", "Realizado 2025", f"Realizado mesmo período/2025 (até mês {mes_ref})",
+               "Δ mesmo período (2026 − 2025)"],
+        columns=cols_tipo,
+    )
+    resumo["Total"] = resumo.sum(axis=1)
+    resumo = resumo.reset_index().rename(columns={"index": "Indicador"})
+
+    return {
+        "kpis": kpis,
+        "tab_marca": tab_marca,
+        "tab_fase": tab_fase,
+        "resumo": resumo,
+        "cols_tipo": cols_tipo,
+        "resp_ordem": [rotulos_resp.get(r, r) for r in resp_ordem],
+    }
 
 
 def card_html(titulo, valor, subtitulo, cor):
@@ -472,6 +448,13 @@ def grafico_vazio(texto):
     fig.update_yaxes(visible=False)
     fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10), paper_bgcolor="white", plot_bgcolor="white")
     return fig
+
+
+def destacar_total(linha):
+    """Realca linhas de total nas tabelas do Board Geral."""
+    if str(linha.iloc[0]).upper().startswith("TOTAL"):
+        return ["font-weight:700;background-color:#FFF0E1"] * len(linha)
+    return [""] * len(linha)
 
 
 # =========================================================
@@ -503,7 +486,7 @@ with head_title:
     <div style="background:{ORANGE};padding:18px 24px;border-radius:18px;margin-bottom:8px;">
       <div style="font-size:13px;color:white;font-weight:700;letter-spacing:1.2px;">PRÉ-OP | GESTÃO DE PROJETOS</div>
       <div style="font-size:32px;color:white;font-weight:800;">Dashboard de Projetos 2026</div>
-      <div style="font-size:14px;color:white;opacity:.92;">Metas, Radar de Urgência, carteira, risco, prazos, CAPEX e Rational</div>
+      <div style="font-size:14px;color:white;opacity:.92;">Metas, carteira, risco, prazos e Board Geral por responsável</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -511,14 +494,14 @@ caminho_default = Path(__file__).parent / ARQUIVO_PADRAO
 with st.sidebar:
     st.header("Fonte de dados")
     fonte_escolhida = st.radio("Origem", ["SharePoint", "Arquivo local"], index=0)
-    st.caption("SharePoint é a fonte padrão. O painel tenta atualizar a base online a cada 5 minutos.")
+    st.caption("SharePoint é a fonte padrão. O painel tenta atualizar a base online a cada 1 hora.")
     caminho_digitado = st.text_input("Arquivo local / contingência", value=str(caminho_default))
     if st.button("🔄 Atualizar dados agora", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
 try:
-    df_metas, ativos, realizados_tipos, inauguracoes_realizadas, totais_oficiais, radar_base, info_radar, fonte_usada, aviso_fonte = carregar_dados(
+    df_metas, ativos, realizados_tipos, inauguracoes_realizadas, totais_oficiais, geral_raw, fonte_usada, aviso_fonte = carregar_dados(
         fonte_escolhida, caminho_digitado
     )
 except Exception as e:
@@ -545,6 +528,7 @@ tipos_disponiveis = [TIPO_LABELS[t] for t in TIPOS_PROJETO]
 with st.sidebar:
     st.divider()
     st.header("Filtros")
+    st.caption("Os filtros valem para todas as páginas, exceto o Board Geral, que usa a base completa da aba Geral.")
     marcas_filtro = st.multiselect("Marca", marcas_disponiveis, default=marcas_disponiveis)
     tipos_filtro = st.multiselect("Tipo de projeto", tipos_disponiveis, default=tipos_disponiveis)
     responsaveis = sorted(ativos["Responsável"].dropna().astype(str).unique()) if "Responsável" in ativos else []
@@ -560,8 +544,8 @@ if responsaveis:
 # =========================================================
 # ABAS
 # =========================================================
-tab_exec, tab_radar, tab_oper, tab_prazos, tab_detalhe = st.tabs([
-    "Visão Executiva", "Radar", "Visão Operacional", "Gestão de Prazos", "Detalhamento"
+tab_exec, tab_oper, tab_prazos, tab_board, tab_detalhe = st.tabs([
+    "Visão Executiva", "Visão Operacional", "Gestão de Prazos", "Board Geral", "Detalhamento"
 ])
 
 # =========================================================
@@ -569,7 +553,6 @@ tab_exec, tab_radar, tab_oper, tab_prazos, tab_detalhe = st.tabs([
 # =========================================================
 with tab_exec:
     # Orçado total = soma das linhas por marca. Meta = 80% do orçado.
-    todas_marcas_selecionadas = set(marcas_filtro) == set(marcas_disponiveis)
     orcado_total = int(metas["Meta"].sum())
     meta_total = int(round(orcado_total * META_PERCENTUAL))
     realizado_total = int(metas["Realizado"].sum())
@@ -664,134 +647,6 @@ with tab_exec:
     st.plotly_chart(fig, use_container_width=True)
 
 # =========================================================
-# RADAR - SINAIS DE URGÊNCIA DAS UNIDADES EM ANDAMENTO
-# =========================================================
-with tab_radar:
-    st.subheader("Radar")
-    st.caption("Filtre a visão para exibir somente as unidades que precisam da sua atenção.")
-
-    radar = radar_base.copy()
-    tipos_radar = ["Inauguração", "Reforma", "Repasse", "Virada Digital"]
-    sinais_ordem = ["🔴 CRÍTICO", "🟡 ATENÇÃO", "🟢 ACOMPANHAR", "SEM SINAL"]
-    cores_sinais = {"🔴 CRÍTICO": RED, "🟡 ATENÇÃO": GOLD, "🟢 ACOMPANHAR": GREEN, "SEM SINAL": GRAY}
-
-    if not info_radar.get("disponivel"):
-        st.warning(info_radar.get("motivo") or "A aba Radar não foi encontrada.")
-    elif radar.empty:
-        st.warning(info_radar.get("motivo") or "Não há textos classificados na aba Radar.")
-    else:
-        # Filtros simples e independentes da aba Geral.
-        marcas_radar = sorted(radar["Marca Radar"].dropna().unique().tolist())
-        sinais_existentes = [s for s in sinais_ordem if s in set(radar["Sinal Radar"])]
-        tipos_existentes = [t for t in tipos_radar if t in set(radar["Tipo Radar"])]
-
-        f1, f2, f3 = st.columns(3)
-        with f1:
-            marca_sel = st.selectbox(
-                "Escolha a marca",
-                ["Todas"] + marcas_radar,
-                key="radar_marca_unica",
-            )
-        with f2:
-            sinal_sel = st.selectbox(
-                "Escolha o status",
-                ["Todos"] + sinais_existentes,
-                key="radar_status_unico",
-            )
-        with f3:
-            tipo_sel = st.selectbox(
-                "Tipo de projeto",
-                ["Todos"] + tipos_existentes,
-                key="radar_tipo_unico",
-            )
-
-        # Pesquisa por nome/trecho da unidade.
-        p1, p2 = st.columns([5, 1])
-        with p1:
-            termo_digitado = st.text_input(
-                "Pesquisar unidade",
-                placeholder="Ex.: Bangu, Norte Shopping, Vitória, RB1...",
-                key="radar_busca_digitada",
-            )
-        with p2:
-            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-            pesquisar = st.button("🔎 Pesquisar", use_container_width=True, key="radar_btn_pesquisar")
-
-        if "radar_termo_busca" not in st.session_state:
-            st.session_state["radar_termo_busca"] = ""
-
-        if pesquisar:
-            st.session_state["radar_termo_busca"] = termo_digitado.strip()
-
-        radar_filtrado = radar.copy()
-        if marca_sel != "Todas":
-            radar_filtrado = radar_filtrado[radar_filtrado["Marca Radar"] == marca_sel]
-        if sinal_sel != "Todos":
-            radar_filtrado = radar_filtrado[radar_filtrado["Sinal Radar"] == sinal_sel]
-        if tipo_sel != "Todos":
-            radar_filtrado = radar_filtrado[radar_filtrado["Tipo Radar"] == tipo_sel]
-
-        termo_busca = st.session_state.get("radar_termo_busca", "").strip()
-        if termo_busca:
-            termo_norm = normalizar_texto(termo_busca)
-            radar_filtrado = radar_filtrado[
-                radar_filtrado["Texto Radar"]
-                .astype(str)
-                .map(normalizar_texto)
-                .str.contains(termo_norm, na=False, regex=False)
-            ].copy()
-            st.caption(f'Pesquisa ativa: "{termo_busca}"')
-
-            if st.button("✕ Limpar pesquisa", key="radar_limpar_busca"):
-                st.session_state["radar_termo_busca"] = ""
-                st.session_state["radar_busca_digitada"] = ""
-                st.rerun()
-
-        # Resumo compacto — sem excesso de cards e gráficos.
-        total = len(radar_filtrado)
-        criticos = int((radar_filtrado["Sinal Radar"] == "🔴 CRÍTICO").sum())
-        atencao = int((radar_filtrado["Sinal Radar"] == "🟡 ATENÇÃO").sum())
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Unidades exibidas", total)
-        m2.metric("Críticas", criticos)
-        m3.metric("Em atenção", atencao)
-
-        st.divider()
-
-        if radar_filtrado.empty:
-            st.info("Nenhuma unidade encontrada com os filtros selecionados.")
-        else:
-            prioridade_sinal = {s: i for i, s in enumerate(sinais_ordem)}
-            radar_filtrado["_sinal_ord"] = radar_filtrado["Sinal Radar"].map(prioridade_sinal).fillna(99)
-            radar_filtrado["_tipo_ord"] = radar_filtrado["Tipo Radar"].map({t: i for i, t in enumerate(tipos_radar)}).fillna(99)
-            radar_filtrado = radar_filtrado.sort_values(["Marca Radar", "_sinal_ord", "_tipo_ord", "Linha Radar"])
-
-            marcas_visiveis = radar_filtrado["Marca Radar"].drop_duplicates().tolist()
-            abrir_marca = len(marcas_visiveis) == 1
-
-            for marca in marcas_visiveis:
-                bloco_marca = radar_filtrado[radar_filtrado["Marca Radar"] == marca]
-                with st.expander(f"{marca}  •  {len(bloco_marca)} registro(s)", expanded=abrir_marca):
-                    for sinal in sinais_ordem:
-                        bloco_sinal = bloco_marca[bloco_marca["Sinal Radar"] == sinal]
-                        if bloco_sinal.empty:
-                            continue
-
-                        st.markdown(f"**{sinal}**")
-                        tipos_presentes = [t for t in tipos_radar if t in set(bloco_sinal["Tipo Radar"])]
-                        for tipo in tipos_presentes:
-                            itens = bloco_sinal[bloco_sinal["Tipo Radar"] == tipo]["Texto Radar"].tolist()
-                            st.markdown(f"<span style='font-size:0.85rem;color:#6B7280;font-weight:600;'>{tipo}</span>", unsafe_allow_html=True)
-                            for item in itens:
-                                st.markdown(
-                                    f"<div style='padding:8px 12px;margin:5px 0 9px 0;background:#F8F9FA;"
-                                    f"border-radius:9px;border-left:4px solid {cores_sinais.get(sinal, GRAY)};"
-                                    f"font-size:0.92rem;'>{item}</div>",
-                                    unsafe_allow_html=True,
-                                )
-
-
-# =========================================================
 # VISAO OPERACIONAL - TODOS OS TIPOS DE PROJETO
 # =========================================================
 with tab_oper:
@@ -843,30 +698,6 @@ with tab_oper:
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.plotly_chart(grafico_vazio("Sem informação de responsável"), use_container_width=True)
-
-    st.subheader("CAPEX da carteira")
-    capex = ativos_f.get("Capex_norm", pd.Series(index=ativos_f.index, dtype=str))
-    capex_kpis = {
-        "Não preenchido": int((capex == "NAO PREENCHIDO").sum()),
-        "Não enviado": int((capex == "NAO ENVIADO").sum()),
-        "Acima do previsto": int(capex.str.contains("ACIMA DO PREVISTO", na=False).sum()),
-        "Dentro do previsto": int(capex.str.contains("DENTRO DO PREVISTO", na=False).sum()),
-    }
-    cc = st.columns(4)
-    for col, (nome, valor) in zip(cc, capex_kpis.items()):
-        cor = RED if nome in ["Não preenchido", "Não enviado", "Acima do previsto"] and valor else GREEN
-        with col:
-            st.markdown(card_html(nome.upper(), valor, "projetos", cor), unsafe_allow_html=True)
-
-    st.subheader("Status Rational")
-    rational = ativos_f.get("Status Rational_norm", pd.Series(index=ativos_f.index, dtype=str))
-    rat_order = ["COMPRAR", "COMPRADO", "RECEBIDO", "INSTALADO", "NAO PRECISA"]
-    rat_counts = rational.value_counts().reindex(rat_order, fill_value=0)
-    rat_df = rat_counts.rename_axis("Status Rational").reset_index(name="Quantidade")
-    fig = px.bar(rat_df, x="Status Rational", y="Quantidade", text_auto=True)
-    fig.update_traces(marker_color=TEAL, textposition="outside")
-    fig.update_layout(height=340, plot_bgcolor="white", paper_bgcolor="white", xaxis_title="", yaxis_title="Projetos")
-    st.plotly_chart(fig, use_container_width=True)
 
 # =========================================================
 # GESTAO DE PRAZOS
@@ -945,6 +776,96 @@ with tab_prazos:
     st.plotly_chart(fig, use_container_width=True)
 
 # =========================================================
+# BOARD GERAL - replica da aba Board_geral, calculada sobre a aba Geral
+# =========================================================
+with tab_board:
+    mes_ref = datetime.now().month
+    board = calcular_board(geral_raw, mes_ref)
+    kpis = board["kpis"]
+
+    st.subheader("Board Geral")
+    st.markdown(
+        "<div class='section-note'>Mesma lógica da aba Board_geral da planilha, calculada sobre a aba Geral: "
+        "carteira = Status <b>Previsto</b>; Em andamento = Total − Pausado − Aguardando início; "
+        f"Realizado 2025/2026 pelo Ano Previsto; mesmo período = Mês Previsto ≤ {mes_ref} (mês atual). "
+        "Esta página não usa os filtros da barra lateral.</div>",
+        unsafe_allow_html=True,
+    )
+
+    # ---- Cards: total e por tipo ----
+    cards = st.columns(7)
+    with cards[0]:
+        st.markdown(card_html("EM ANDAMENTO", kpis["TOTAL"], "total de projetos previstos", DARK), unsafe_allow_html=True)
+    for col, t in zip(cards[1:], BOARD_TIPOS):
+        rotulo = TIPO_LABELS[t]
+        with col:
+            st.markdown(card_html(rotulo.upper(), kpis[t], "previstos", TIPO_COLORS[rotulo]), unsafe_allow_html=True)
+
+    # ---- Tabela 1: responsavel x tipo x marca ----
+    st.write("")
+    st.subheader("Carteira por responsável, tipo e marca")
+    st.markdown("<div class='section-note'>Linhas sem projetos foram ocultadas.</div>", unsafe_allow_html=True)
+    if board["tab_marca"].empty:
+        st.info("Sem projetos previstos na aba Geral.")
+    else:
+        st.dataframe(
+            board["tab_marca"].style.apply(destacar_total, axis=1),
+            use_container_width=True, hide_index=True,
+            height=min(38 * (len(board["tab_marca"]) + 1) + 3, 760),
+        )
+
+    # ---- Graficos ----
+    tab_fase = board["tab_fase"]
+    cols_tipo = board["cols_tipo"]
+    g1, g2 = st.columns(2)
+    with g1:
+        st.subheader("Fases da carteira por responsável")
+        fase_plot = tab_fase[tab_fase["Fase"] != "Realizado 2026"].groupby(["Responsável", "Fase"], sort=False)["Total"].sum().reset_index()
+        fase_plot = fase_plot[fase_plot["Total"] > 0]
+        if not fase_plot.empty:
+            fig = px.bar(
+                fase_plot, x="Responsável", y="Total", color="Fase", barmode="stack", text_auto=True,
+                category_orders={"Responsável": board["resp_ordem"], "Fase": [FASE_LABELS[f] for f in BOARD_FASES]},
+                color_discrete_map=FASE_COLORS,
+            )
+            fig.update_layout(height=400, plot_bgcolor="white", paper_bgcolor="white", legend_title_text="", xaxis_title="", yaxis_title="Projetos")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.plotly_chart(grafico_vazio("Sem projetos previstos"), use_container_width=True)
+
+    with g2:
+        st.subheader("Realizado 2026 x mesmo período de 2025")
+        resumo = board["resumo"]
+        lin_26 = resumo[resumo["Indicador"] == "Total realizado 2026"].iloc[0]
+        lin_25 = resumo[resumo["Indicador"].str.startswith("Realizado mesmo período")].iloc[0]
+        comp = pd.DataFrame({
+            "Tipo": cols_tipo * 2,
+            "Período": ["2026"] * len(cols_tipo) + ["Mesmo período 2025"] * len(cols_tipo),
+            "Quantidade": [int(lin_26[c]) for c in cols_tipo] + [int(lin_25[c]) for c in cols_tipo],
+        })
+        fig = px.bar(
+            comp, x="Tipo", y="Quantidade", color="Período", barmode="group", text_auto=True,
+            color_discrete_map={"2026": ORANGE, "Mesmo período 2025": "#C9C9C9"},
+            category_orders={"Tipo": cols_tipo},
+        )
+        fig.update_layout(height=400, plot_bgcolor="white", paper_bgcolor="white", legend_title_text="", xaxis_title="", yaxis_title="Projetos")
+        fig.update_traces(textposition="outside")
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ---- Tabela 2: responsavel x fase x tipo ----
+    st.subheader("Tipo e fase por responsável")
+    st.dataframe(
+        tab_fase, use_container_width=True, hide_index=True,
+        height=min(38 * (len(tab_fase) + 1) + 3, 760),
+    )
+
+    # ---- Resumo total ----
+    st.subheader("Totais e comparativo com 2025")
+    st.dataframe(
+        board["resumo"], use_container_width=True, hide_index=True,
+    )
+
+# =========================================================
 # DETALHAMENTO
 # =========================================================
 with tab_detalhe:
@@ -952,7 +873,7 @@ with tab_detalhe:
     colunas = [c for c in [
         "Tipo Painel", "Marca", "Restaurante", "Passagem de bastão", "Data Contrato", "Data Prevista", "Prazo Planejado (dias)",
         "Dias Consumidos", "% Prazo Consumido", "Dias até Prevista", "Responsável", "Etapa", "Grupo Status",
-        "Risco", "Capex", "Status Rational", "Comentários"
+        "Risco", "Comentários"
     ] if c in ativos_f.columns]
     detalhe = ativos_f[colunas].copy()
     for c in ["Passagem de bastão", "Data Contrato", "Data Prevista"]:
@@ -976,7 +897,8 @@ with tab_detalhe:
     st.dataframe(real_ex, use_container_width=True, hide_index=True)
 
 st.caption(
-    "Fonte padrão: SharePoint; o Radar lê diretamente as colunas Marca, Modelo e Loja / status da aba Radar/Farol. Tipos operacionais: Inauguração, Reforma, Repasse, Mudança de Ponto, Virada Digital e Migração. "
+    "Fonte padrão: SharePoint. Tipos operacionais: Inauguração, Reforma, Repasse, Mudança de Ponto, Virada Digital e Migração. "
     "Prazo planejado = Data Contrato − Passagem de bastão. Tempo real = Data Realizada − Passagem de bastão. "
-    "Desvio = Data Realizada − Data Contrato. Idade ativa = Hoje − Data Contrato. Atualização automática a cada 5 minutos."
+    "Desvio = Data Realizada − Data Contrato. Idade ativa = Hoje − Data Contrato. Atualização automática a cada 1 hora."
+)
 )
