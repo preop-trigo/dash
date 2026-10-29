@@ -100,6 +100,25 @@ RESUMO_ROTULOS = {
 RESUMO_ALIAS = {"CPQ": "CASA DO PAO DE QUEIJO"}
 
 
+# Etapas (coluna N da aba Geral) para o grafico "Etapa por tipo de projeto"
+ETAPA_LABELS = {
+    "PLANEJAMENTO": "Planejamento",
+    "EXECUCAO": "Execução",
+    "FINALIZACAO": "Finalização",
+    "PAUSADO": "Pausado",
+    "AGUARDANDO INICIO": "Aguardando início",
+}
+ETAPA_ORDER = ["Planejamento", "Execução", "Finalização", "Pausado", "Aguardando início", "Sem etapa"]
+ETAPA_COLORS = {
+    "Planejamento": GOLD,
+    "Execução": TEAL,
+    "Finalização": PINK,
+    "Pausado": GRAY,
+    "Aguardando início": BLUE,
+    "Sem etapa": "#C9C9C9",
+}
+
+
 def normalizar_texto(valor):
     if pd.isna(valor):
         return ""
@@ -238,6 +257,9 @@ def carregar_dados(fonte: str, arquivo_local: str):
     # Copia da base Geral sem transformacoes, usada pela pagina Resumo.
     geral_raw = df.copy()
 
+    # Remove espacos sobrando no nome da marca (ex.: "CHINA IN BOX ").
+    df["Marca"] = df["Marca"].where(df["Marca"].isna(), df["Marca"].astype(str).str.strip())
+
     for c in ["Data Prevista", "Data Realizada", "Passagem de bastão", "Data Contrato"]:
         df[c] = pd.to_datetime(df[c], errors="coerce")
 
@@ -258,6 +280,18 @@ def carregar_dados(fonte: str, arquivo_local: str):
         filtro_ano = base_tipos["Data Prevista"].dt.year.eq(ANO)
 
     ativos = base_tipos[(base_tipos["Status_norm"] == "PREVISTO") & filtro_ano].copy()
+
+    # Todos os projetos previstos da aba Geral (qualquer ano e qualquer Tipo da coluna L).
+    previstos_todos = df[df["Status_norm"] == "PREVISTO"].copy()
+    previstos_todos["Tipo Painel"] = [
+        TIPO_LABELS.get(n, str(o).strip().title() if pd.notna(o) and str(o).strip() else "Sem tipo")
+        for n, o in zip(previstos_todos["Tipo_norm"], previstos_todos["Tipo"])
+    ]
+    previstos_todos["Etapa Painel"] = previstos_todos["Etapa_norm"].map(ETAPA_LABELS).fillna("Sem etapa")
+    if "Responsável" in previstos_todos.columns:
+        previstos_todos["Responsável"] = previstos_todos["Responsável"].map(
+            lambda v: "Sem responsável" if pd.isna(v) or str(v).strip() in ("", "?") else str(v).strip()
+        )
     ativos["Grupo Status"] = ativos["Etapa_norm"].map(STATUS_MAP)
 
     # Inclui os previstos mesmo se a etapa ainda nao estiver classificada;
@@ -290,7 +324,7 @@ def carregar_dados(fonte: str, arquivo_local: str):
         "Realizado": total_oficial_realizado if total_oficial_realizado is not None else int(df_metas["Realizado"].sum()),
     }
 
-    return df_metas, ativos, realizados_tipos, inauguracoes_realizadas, totais_oficiais, geral_raw, fonte_usada, aviso_fonte
+    return df_metas, ativos, realizados_tipos, inauguracoes_realizadas, totais_oficiais, geral_raw, previstos_todos, fonte_usada, aviso_fonte
 
 
 # =========================================================
@@ -474,7 +508,7 @@ with st.sidebar:
         st.rerun()
 
 try:
-    df_metas, ativos, realizados_tipos, inauguracoes_realizadas, totais_oficiais, geral_raw, fonte_usada, aviso_fonte = carregar_dados(
+    df_metas, ativos, realizados_tipos, inauguracoes_realizadas, totais_oficiais, geral_raw, previstos_todos, fonte_usada, aviso_fonte = carregar_dados(
         fonte_escolhida, caminho_digitado
     )
 except Exception as e:
@@ -495,7 +529,7 @@ if aviso_fonte:
 # =========================================================
 # FILTROS
 # =========================================================
-marcas_disponiveis = sorted(set(df_metas["Marca"].dropna()) | set(ativos["Marca"].dropna()) | set(realizados_tipos["Marca"].dropna()))
+marcas_disponiveis = sorted(set(df_metas["Marca"].dropna()) | set(ativos["Marca"].dropna()) | set(realizados_tipos["Marca"].dropna()) | set(previstos_todos["Marca"].dropna()))
 tipos_disponiveis = [TIPO_LABELS[t] for t in TIPOS_PROJETO]
 
 with st.sidebar:
@@ -504,7 +538,7 @@ with st.sidebar:
     st.caption("Os filtros valem para todas as páginas, exceto a página Resumo, que usa a base completa.")
     marcas_filtro = st.multiselect("Marca", marcas_disponiveis, default=marcas_disponiveis)
     tipos_filtro = st.multiselect("Tipo de projeto", tipos_disponiveis, default=tipos_disponiveis)
-    responsaveis = sorted(ativos["Responsável"].dropna().astype(str).unique()) if "Responsável" in ativos else []
+    responsaveis = sorted(set(ativos["Responsável"].dropna().astype(str)) | set(previstos_todos["Responsável"].dropna().astype(str))) if "Responsável" in ativos else []
     responsaveis_filtro = st.multiselect("Responsável", responsaveis, default=responsaveis)
 
 metas = df_metas[df_metas["Marca"].isin(marcas_filtro)].copy()
@@ -513,6 +547,13 @@ real_f = realizados_tipos[(realizados_tipos["Marca"].isin(marcas_filtro)) & (rea
 real_inaug = inauguracoes_realizadas[inauguracoes_realizadas["Marca"].isin(marcas_filtro)].copy()
 if responsaveis:
     ativos_f = ativos_f[ativos_f["Responsável"].astype(str).isin(responsaveis_filtro)].copy()
+
+# Todos os projetos previstos (aba Geral, qualquer ano e tipo) com os filtros da barra lateral.
+previstos_f = previstos_todos[previstos_todos["Marca"].isin(marcas_filtro)].copy()
+if len(tipos_filtro) < len(tipos_disponiveis):
+    previstos_f = previstos_f[previstos_f["Tipo Painel"].isin(tipos_filtro)].copy()
+if responsaveis and set(responsaveis_filtro) != set(responsaveis):
+    previstos_f = previstos_f[previstos_f["Responsável"].astype(str).isin(responsaveis_filtro)].copy()
 
 # =========================================================
 # ABAS
@@ -634,27 +675,29 @@ with tab_oper:
 
     st.write("")
     st.subheader("Etapa por tipo de projeto")
-    status_base = ativos_f[ativos_f["Grupo Status"].notna()].copy()
-    if not status_base.empty:
-        status_tipo = status_base.groupby(["Tipo Painel", "Grupo Status"]).size().reset_index(name="Quantidade")
+    st.markdown("<div class='section-note'>Todos os projetos previstos da aba Geral, coloridos pela Etapa (coluna N).</div>", unsafe_allow_html=True)
+    tipos_ordem = tipos_disponiveis + sorted(t for t in previstos_f["Tipo Painel"].unique() if t not in tipos_disponiveis)
+    if not previstos_f.empty:
+        status_tipo = previstos_f.groupby(["Tipo Painel", "Etapa Painel"]).size().reset_index(name="Quantidade")
         fig = px.bar(
-            status_tipo, x="Tipo Painel", y="Quantidade", color="Grupo Status", barmode="stack", text_auto=True,
-            category_orders={"Grupo Status": STATUS_ORDER, "Tipo Painel": tipos_disponiveis},
-            color_discrete_map=STATUS_COLORS,
+            status_tipo, x="Tipo Painel", y="Quantidade", color="Etapa Painel", barmode="stack", text_auto=True,
+            category_orders={"Etapa Painel": ETAPA_ORDER, "Tipo Painel": tipos_ordem},
+            color_discrete_map=ETAPA_COLORS,
         )
         fig.update_layout(height=430, plot_bgcolor="white", paper_bgcolor="white", legend_title_text="", xaxis_title="", yaxis_title="Projetos")
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.plotly_chart(grafico_vazio("Sem etapas classificadas nos filtros selecionados"), use_container_width=True)
+        st.plotly_chart(grafico_vazio("Sem projetos previstos nos filtros selecionados"), use_container_width=True)
 
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Risco por tipo")
-        risco_tipo = ativos_f[ativos_f.get("Risco_norm", "").isin(RISCO_ORDER)].groupby(["Tipo Painel", "Risco_norm"]).size().reset_index(name="Quantidade")
+        st.markdown("<div class='section-note'>Todos os projetos previstos da aba Geral.</div>", unsafe_allow_html=True)
+        risco_tipo = previstos_f[previstos_f["Risco_norm"].isin(RISCO_ORDER)].groupby(["Tipo Painel", "Risco_norm"]).size().reset_index(name="Quantidade")
         if not risco_tipo.empty:
             fig = px.bar(
                 risco_tipo, x="Tipo Painel", y="Quantidade", color="Risco_norm", barmode="stack", text_auto=True,
-                color_discrete_map=RISCO_COLORS, category_orders={"Tipo Painel": tipos_disponiveis, "Risco_norm": RISCO_ORDER}
+                color_discrete_map=RISCO_COLORS, category_orders={"Tipo Painel": tipos_ordem, "Risco_norm": RISCO_ORDER}
             )
             fig.update_layout(height=390, plot_bgcolor="white", paper_bgcolor="white", legend_title_text="", xaxis_title="", yaxis_title="Projetos")
             st.plotly_chart(fig, use_container_width=True)
@@ -663,11 +706,17 @@ with tab_oper:
 
     with c2:
         st.subheader("Projetos por responsável")
-        if "Responsável" in ativos_f.columns and not ativos_f.empty:
-            resp = ativos_f.groupby("Responsável").size().reset_index(name="Projetos").sort_values("Projetos")
-            fig = px.bar(resp, x="Projetos", y="Responsável", orientation="h", text_auto=True)
-            fig.update_traces(marker_color=ORANGE, textposition="outside")
-            fig.update_layout(height=max(390, 36 * len(resp) + 80), plot_bgcolor="white", paper_bgcolor="white", xaxis_title="Projetos", yaxis_title="")
+        st.markdown("<div class='section-note'>Projetos previstos da aba Geral, por todos os tipos da coluna L.</div>", unsafe_allow_html=True)
+        if not previstos_f.empty:
+            resp = previstos_f.groupby(["Responsável", "Tipo Painel"]).size().reset_index(name="Projetos")
+            ordem_resp = resp.groupby("Responsável")["Projetos"].sum().sort_values().index.tolist()
+            fig = px.bar(
+                resp, x="Projetos", y="Responsável", color="Tipo Painel", orientation="h", barmode="stack", text_auto=True,
+                category_orders={"Responsável": ordem_resp, "Tipo Painel": tipos_ordem},
+                color_discrete_map=TIPO_COLORS,
+            )
+            fig.update_layout(height=max(390, 36 * len(ordem_resp) + 100), plot_bgcolor="white", paper_bgcolor="white",
+                              legend_title_text="", xaxis_title="Projetos", yaxis_title="")
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.plotly_chart(grafico_vazio("Sem informação de responsável"), use_container_width=True)
