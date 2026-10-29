@@ -757,46 +757,6 @@ with tab_prazos:
             st.markdown(card_html(t, v, s, cor), unsafe_allow_html=True)
 
     st.write("")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Prazo planejado médio por tipo")
-        base = ativos_f[ativos_f["Prazo Planejado (dias)"].notna()].copy()
-        if not base.empty:
-            pm = base.groupby("Tipo Painel")["Prazo Planejado (dias)"].mean().round().reset_index().sort_values("Prazo Planejado (dias)")
-            fig = px.bar(pm, x="Prazo Planejado (dias)", y="Tipo Painel", orientation="h", text="Prazo Planejado (dias)", color="Tipo Painel", color_discrete_map=TIPO_COLORS)
-            fig.update_traces(texttemplate="%{text:.0f} dias", textposition="outside")
-            fig.update_layout(height=400, showlegend=False, plot_bgcolor="white", paper_bgcolor="white", xaxis_title="Dias", yaxis_title="")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.plotly_chart(grafico_vazio("Sem Passagem de bastão + Data Contrato"), use_container_width=True)
-
-    with c2:
-        st.subheader("Tempo real médio por tipo")
-        base = real_f[real_f["Tempo Real (dias)"].notna()].copy()
-        if not base.empty:
-            tr = base.groupby("Tipo Painel")["Tempo Real (dias)"].mean().round().reset_index().sort_values("Tempo Real (dias)")
-            fig = px.bar(tr, x="Tempo Real (dias)", y="Tipo Painel", orientation="h", text="Tempo Real (dias)", color="Tipo Painel", color_discrete_map=TIPO_COLORS)
-            fig.update_traces(texttemplate="%{text:.0f} dias", textposition="outside")
-            fig.update_layout(height=400, showlegend=False, plot_bgcolor="white", paper_bgcolor="white", xaxis_title="Dias", yaxis_title="")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.plotly_chart(grafico_vazio("Sem Passagem de bastão + Data Realizada"), use_container_width=True)
-
-    st.subheader("Projetos ativos próximos ou acima da Data Prevista")
-    prazo_status = ativos_f[ativos_f["Data Prevista"].notna()].copy()
-    prazo_status["Situação prazo"] = pd.cut(
-        prazo_status["Dias até Prevista"],
-        bins=[-10**9, -1, 15, 30, 10**9],
-        labels=["ATRASADO", "ATÉ 15 DIAS", "16 A 30 DIAS", "ACIMA DE 30 DIAS"],
-    )
-    ordem_prazo = ["ATRASADO", "ATÉ 15 DIAS", "16 A 30 DIAS", "ACIMA DE 30 DIAS"]
-    pc = prazo_status["Situação prazo"].value_counts().reindex(ordem_prazo, fill_value=0).reset_index()
-    pc.columns = ["Situação", "Projetos"]
-    fig = px.bar(pc, x="Situação", y="Projetos", text_auto=True, color="Situação",
-                 color_discrete_map={"ATRASADO": RED, "ATÉ 15 DIAS": ORANGE, "16 A 30 DIAS": GOLD, "ACIMA DE 30 DIAS": GREEN})
-    fig.update_layout(height=360, showlegend=False, plot_bgcolor="white", paper_bgcolor="white", xaxis_title="", yaxis_title="Projetos")
-    st.plotly_chart(fig, use_container_width=True)
-
     # ---------- Inaugurações: idade dos ativos e tempo médio por marca ----------
     st.divider()
     st.subheader("Inaugurações: idade dos projetos ativos")
