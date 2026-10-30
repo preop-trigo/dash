@@ -1,3 +1,4 @@
+import html
 from pathlib import Path
 from io import BytesIO
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
@@ -558,8 +559,8 @@ if responsaveis and set(responsaveis_filtro) != set(responsaveis):
 # =========================================================
 # ABAS
 # =========================================================
-tab_exec, tab_oper, tab_prazos, tab_resumo, tab_detalhe = st.tabs([
-    "Visão Executiva", "Visão Operacional", "Gestão de Prazos", "Resumo", "Detalhamento"
+tab_exec, tab_oper, tab_prazos, tab_resumo, tab_agenda, tab_detalhe = st.tabs([
+    "Visão Executiva", "Visão Operacional", "Gestão de Prazos", "Resumo", "Agenda", "Detalhamento"
 ])
 
 # =========================================================
@@ -863,6 +864,83 @@ with tab_resumo:
         "</div>",
         unsafe_allow_html=True,
     )
+
+# =========================================================
+# AGENDA - proximas inauguracoes (mes vigente + 2 meses)
+# =========================================================
+MESES_PT = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+            "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
+
+
+def limpar_farol(valor):
+    """Devolve o farol da coluna V; ignora vazios e erros do Excel (#REF!)."""
+    if pd.isna(valor):
+        return ""
+    txt = str(valor).strip()
+    return "" if txt.startswith("#") or txt.lower() == "nan" else txt
+
+
+def html_agenda(sub: pd.DataFrame, hoje: pd.Timestamp) -> str:
+    """Tabela: Data prevista - Unidade - Farol - Observação."""
+    cab = "".join(
+        f"<th style='text-align:{al};padding:8px 10px;font-size:12px;color:#555;border-bottom:2px solid {ORANGE};"
+        f"white-space:nowrap;'>{t}</th>"
+        for t, al in [("Data prevista", "left"), ("Unidade", "left"), ("Farol", "center"), ("Observação", "left")]
+    )
+    linhas = ""
+    for _, r in sub.iterrows():
+        atrasada = r["Data Prevista"] < hoje
+        cor_data = f"color:{RED};font-weight:800;" if atrasada else f"color:{DARK};font-weight:700;"
+        farol = html.escape(limpar_farol(r.get("FAROL RISCOS")))
+        obs = html.escape("" if pd.isna(r.get("Comentários")) else str(r.get("Comentários")).strip())
+        linhas += (
+            "<tr style='border-bottom:1px solid #F0F0F0;vertical-align:top;'>"
+            f"<td style='padding:9px 10px;white-space:nowrap;{cor_data}'>{r['Data Prevista'].strftime('%d/%m/%Y')}</td>"
+            f"<td style='padding:9px 10px;font-weight:700;color:{DARK};min-width:220px;'>{html.escape(str(r['Restaurante']))}</td>"
+            f"<td style='padding:9px 10px;text-align:center;font-size:18px;'>{farol}</td>"
+            f"<td style='padding:9px 10px;color:#444;font-size:13px;line-height:1.35;'>{obs}</td>"
+            "</tr>"
+        )
+    return (
+        "<div style='background:white;border-radius:14px;padding:6px 10px;box-shadow:0 2px 10px rgba(0,0,0,.06);margin-bottom:14px;overflow-x:auto;'>"
+        f"<table style='width:100%;border-collapse:collapse;'><thead><tr>{cab}</tr></thead><tbody>{linhas}</tbody></table></div>"
+    )
+
+
+with tab_agenda:
+    st.subheader("Agenda de próximas inaugurações")
+    st.markdown(
+        "<div class='section-note'>Projetos <b>previstos</b> da aba Geral, pela Data Prevista, no mês atual e nos 2 meses seguintes, "
+        "separados por tipo. Datas em vermelho já passaram e o projeto ainda não foi realizado. Segue os filtros da barra lateral.</div>",
+        unsafe_allow_html=True,
+    )
+    hoje_ag = pd.Timestamp.today().normalize()
+    meses_ag = [hoje_ag.to_period("M") + i for i in range(3)]
+    ag = previstos_f.copy()
+    ag["Data Prevista"] = pd.to_datetime(ag["Data Prevista"], errors="coerce")
+    ag = ag[ag["Data Prevista"].notna()].copy()
+    ag["_periodo"] = ag["Data Prevista"].dt.to_period("M")
+    tipos_ag = tipos_disponiveis + sorted(t for t in ag["Tipo Painel"].unique() if t not in tipos_disponiveis)
+
+    abas_mes = st.tabs([
+        f"{MESES_PT[p.month - 1]}/{p.year} ({int((ag['_periodo'] == p).sum())})" for p in meses_ag
+    ])
+    for periodo, aba in zip(meses_ag, abas_mes):
+        with aba:
+            bloco_mes = ag[ag["_periodo"] == periodo]
+            if bloco_mes.empty:
+                st.info("Nenhum projeto previsto para este mês nos filtros selecionados.")
+                continue
+            for tipo in tipos_ag:
+                sub = bloco_mes[bloco_mes["Tipo Painel"] == tipo].sort_values(["Data Prevista", "Restaurante"])
+                if sub.empty:
+                    continue
+                st.markdown(
+                    f"<div style='margin:6px 0 6px 2px;font-size:17px;font-weight:800;color:{TIPO_COLORS.get(tipo, DARK)};'>"
+                    f"{html.escape(tipo)} <span style='font-size:13px;color:#777;font-weight:600;'>· {len(sub)}</span></div>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown(html_agenda(sub, hoje_ag), unsafe_allow_html=True)
 
 # =========================================================
 # DETALHAMENTO
