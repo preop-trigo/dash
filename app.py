@@ -762,7 +762,8 @@ with tab_prazos:
     st.subheader("Inaugurações: idade dos projetos ativos")
     st.markdown(
         "<div class='section-note'>Todos os projetos <b>previstos</b> do tipo Inauguração (qualquer ano). "
-        "Idade = hoje − Passagem de bastão.</div>",
+        "Idade = hoje − Passagem de bastão. O losango marca o prazo planejado (Data Contrato − Passagem de bastão): "
+        "barra verde = dentro do prazo, vermelha = acima do prazo, cinza = sem Data Contrato válida.</div>",
         unsafe_allow_html=True,
     )
     hoje_ref = pd.Timestamp.today().normalize()
@@ -770,22 +771,49 @@ with tab_prazos:
     idade_base["Idade (dias)"] = (hoje_ref - idade_base["Passagem de bastão"]).dt.days
     total_inaug_prev = len(idade_base)
     idade_base = idade_base[idade_base["Idade (dias)"].notna() & (idade_base["Idade (dias)"] >= 0)].copy()
+    # Prazo planejado = Data Contrato - Passagem de bastão (ignora datas ausentes ou invertidas).
+    idade_base["Prazo planejado (dias)"] = (idade_base["Data Contrato"] - idade_base["Passagem de bastão"]).dt.days
+    idade_base.loc[~(idade_base["Prazo planejado (dias)"] > 0), "Prazo planejado (dias)"] = float("nan")
+    idade_base["Situação"] = "Sem prazo planejado"
+    com_prazo = idade_base["Prazo planejado (dias)"].notna()
+    idade_base.loc[com_prazo & (idade_base["Idade (dias)"] <= idade_base["Prazo planejado (dias)"]), "Situação"] = "Dentro do prazo"
+    idade_base.loc[com_prazo & (idade_base["Idade (dias)"] > idade_base["Prazo planejado (dias)"]), "Situação"] = "Acima do prazo"
     if not idade_base.empty:
         idade_base = idade_base.sort_values("Idade (dias)")
-        fig = px.bar(
-            idade_base, x="Idade (dias)", y="Restaurante", color="Marca", orientation="h", text="Idade (dias)",
-            hover_data={"Etapa Painel": True, "Responsável": True, "Passagem de bastão": "|%d/%m/%Y"},
-            category_orders={"Restaurante": idade_base["Restaurante"].tolist()},
-        )
-        fig.update_traces(textposition="outside")
+        ordem_y = idade_base["Restaurante"].tolist()
+        cores_situacao = {"Dentro do prazo": GREEN, "Acima do prazo": RED, "Sem prazo planejado": "#C9C9C9"}
+        fig = go.Figure()
+        for situacao, cor in cores_situacao.items():
+            bloco = idade_base[idade_base["Situação"] == situacao]
+            if bloco.empty:
+                continue
+            fig.add_trace(go.Bar(
+                x=bloco["Idade (dias)"], y=bloco["Restaurante"], orientation="h", name=situacao, marker_color=cor,
+                text=[f"{int(i)} d" for i in bloco["Idade (dias)"]], textposition="outside",
+                customdata=bloco[["Marca", "Etapa Painel", "Responsável", "Prazo planejado (dias)"]].values,
+                hovertemplate="<b>%{y}</b><br>Marca: %{customdata[0]}<br>Etapa: %{customdata[1]}<br>"
+                              "Responsável: %{customdata[2]}<br>Idade: %{x} dias<br>"
+                              "Prazo planejado: %{customdata[3]} dias<extra></extra>",
+            ))
+        marcador = idade_base[com_prazo.loc[idade_base.index]]
+        fig.add_trace(go.Scatter(
+            x=marcador["Prazo planejado (dias)"], y=marcador["Restaurante"], mode="markers", name="Prazo planejado",
+            marker=dict(symbol="diamond", size=11, color=DARK, line=dict(color="white", width=1)),
+            hovertemplate="<b>%{y}</b><br>Prazo planejado: %{x} dias<extra></extra>",
+        ))
         fig.update_layout(
-            height=max(420, 24 * len(idade_base) + 120), plot_bgcolor="white", paper_bgcolor="white",
+            height=max(420, 26 * len(idade_base) + 140), plot_bgcolor="white", paper_bgcolor="white",
             legend_title_text="", xaxis_title="Dias desde a passagem de bastão", yaxis_title="",
+            yaxis=dict(categoryorder="array", categoryarray=ordem_y), barmode="overlay",
         )
         st.plotly_chart(fig, use_container_width=True)
+        n_acima = int((idade_base["Situação"] == "Acima do prazo").sum())
+        n_dentro = int((idade_base["Situação"] == "Dentro do prazo").sum())
+        n_sem = int((idade_base["Situação"] == "Sem prazo planejado").sum())
         st.caption(
             f"{len(idade_base)} de {total_inaug_prev} inaugurações previstas têm Passagem de bastão preenchida · "
-            f"idade média: {idade_base['Idade (dias)'].mean():.0f} dias · mais antiga: {int(idade_base['Idade (dias)'].max())} dias."
+            f"idade média: {idade_base['Idade (dias)'].mean():.0f} dias · mais antiga: {int(idade_base['Idade (dias)'].max())} dias · "
+            f"acima do prazo planejado: {n_acima} · dentro do prazo: {n_dentro} · sem Data Contrato válida: {n_sem}."
         )
     else:
         st.plotly_chart(grafico_vazio("Sem inaugurações previstas com Passagem de bastão"), use_container_width=True)
