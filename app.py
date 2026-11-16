@@ -1010,7 +1010,48 @@ def limpar_farol(valor):
     return "" if txt.startswith("#") or txt.lower() == "nan" else txt
 
 
-def html_agenda(sub: pd.DataFrame, hoje: pd.Timestamp) -> str:
+def blocos_por_marca(df: pd.DataFrame):
+    """Divide o DataFrame por marca, na ordem do painel (marcas extras ao final)."""
+    chaves = df["Marca"].map(chave_marca)
+    extras = sorted(m for m in chaves.unique() if m and m not in STATUS_MARCAS_ORDEM)
+    for m in STATUS_MARCAS_ORDEM + extras:
+        sub = df[chaves == m]
+        if not sub.empty:
+            yield RESUMO_ROTULOS.get(m, m.title()), sub
+
+
+def html_realizados(sub: pd.DataFrame) -> str:
+    """Mesmo modelo da agenda: Data de realização - Unidade - CAPEX - Observação."""
+    selo = {"Entregue": ("✅ Entregue", GREEN), "Não entregue": ("❌ Não entregue", RED), "Não se aplica": ("➖ Não se aplica", "#888")}
+    cab = "".join(
+        f"<th style='text-align:{al};padding:8px 10px;font-size:12px;color:#555;border-bottom:2px solid {ORANGE};white-space:nowrap;'>{t}</th>"
+        for t, al in [("Data de realização", "left"), ("Unidade", "left"), ("CAPEX", "left"), ("Observação", "left")]
+    )
+    linhas = ""
+    for _, r in sub.iterrows():
+        texto, cor = selo[r["CAPEX"]]
+        detalhe = "" if pd.isna(r.get("Capex")) else f"<div style='font-size:11px;color:#888;font-weight:500;'>{html.escape(str(r['Capex']).strip())}</div>"
+        obs = html.escape("" if pd.isna(r.get("Comentários")) else str(r.get("Comentários")).strip())
+        linhas += (
+            "<tr style='border-bottom:1px solid #F0F0F0;vertical-align:top;'>"
+            f"<td style='padding:9px 10px;white-space:nowrap;font-weight:700;color:{DARK};'>{r['Data Realizada'].strftime('%d/%m/%Y')}</td>"
+            f"<td style='padding:9px 10px;font-weight:700;color:{DARK};min-width:220px;'>{html.escape(str(r['Restaurante']))}"
+            f"<div style='font-size:11px;color:#888;font-weight:600;'>{html.escape(str(r['Tipo Painel']))}</div></td>"
+            f"<td style='padding:9px 10px;color:{cor};font-weight:800;white-space:nowrap;'>{texto}{detalhe}</td>"
+            f"<td style='padding:9px 10px;color:#444;font-size:13px;line-height:1.35;'>{obs}</td></tr>"
+        )
+    return (
+        "<div style='background:white;border-radius:14px;padding:6px 10px;box-shadow:0 2px 10px rgba(0,0,0,.06);margin-bottom:14px;overflow-x:auto;'>"
+        f"<table style='width:100%;border-collapse:collapse;'><thead><tr>{cab}</tr></thead><tbody>{linhas}</tbody></table></div>"
+    )
+
+
+def titulo_bloco(texto, qtd, cor=DARK, tamanho=17):
+    return (f"<div style='margin:10px 0 6px 2px;font-size:{tamanho}px;font-weight:800;color:{cor};'>"
+            f"{html.escape(texto)} <span style='font-size:13px;color:#777;font-weight:600;'>· {qtd}</span></div>")
+
+
+def html_agenda(sub: pd.DataFrame, hoje: pd.Timestamp, mostrar_tipo: bool = False) -> str:
     """Tabela: Data prevista - Unidade - Farol - Observação."""
     cab = "".join(
         f"<th style='text-align:{al};padding:8px 10px;font-size:12px;color:#555;border-bottom:2px solid {ORANGE};"
@@ -1022,13 +1063,15 @@ def html_agenda(sub: pd.DataFrame, hoje: pd.Timestamp) -> str:
         tem_data = pd.notna(r["Data Prevista"])
         atrasada = tem_data and r["Data Prevista"] < hoje
         texto_data = r["Data Prevista"].strftime("%d/%m/%Y") if tem_data else "Sem data"
+        tipo_txt = (f"<div style='font-size:11px;color:#888;font-weight:600;'>{html.escape(str(r['Tipo Painel']))}</div>"
+                    if mostrar_tipo else "")
         cor_data = f"color:{RED};font-weight:800;" if atrasada else (f"color:{DARK};font-weight:700;" if tem_data else "color:#999;font-weight:600;")
         farol = html.escape(limpar_farol(r.get("FAROL RISCOS")))
         obs = html.escape("" if pd.isna(r.get("Comentários")) else str(r.get("Comentários")).strip())
         linhas += (
             "<tr style='border-bottom:1px solid #F0F0F0;vertical-align:top;'>"
             f"<td style='padding:9px 10px;white-space:nowrap;{cor_data}'>{texto_data}</td>"
-            f"<td style='padding:9px 10px;font-weight:700;color:{DARK};min-width:220px;'>{html.escape(str(r['Restaurante']))}</td>"
+            f"<td style='padding:9px 10px;font-weight:700;color:{DARK};min-width:220px;'>{html.escape(str(r['Restaurante']))}{tipo_txt}</td>"
             f"<td style='padding:9px 10px;text-align:center;font-size:18px;'>{farol}</td>"
             f"<td style='padding:9px 10px;color:#444;font-size:13px;line-height:1.35;'>{obs}</td>"
             "</tr>"
@@ -1070,7 +1113,7 @@ with tab_status:
 # AGENDA - proximas inauguracoes, demais unidades e realizados 2026
 # =========================================================
 with tab_agenda:
-    sub_atual, sub_demais, sub_real = st.tabs(["Agenda atual", "Demais unidades", "Realizados em 2026"])
+    sub_atual, sub_real = st.tabs(["Agenda atual", "Realizados em 2026"])
 
     hoje_ag = pd.Timestamp.today().normalize()
     periodo_ini = hoje_ag.to_period("M")
@@ -1081,22 +1124,27 @@ with tab_agenda:
     ag_base["Data Prevista"] = pd.to_datetime(ag_base["Data Prevista"], errors="coerce")
     tipos_ag = tipos_disponiveis + sorted(t for t in ag_base["Tipo Painel"].unique() if t not in tipos_disponiveis)
 
-    # ---------- Aba 1: agenda atual (mes vigente + 2) ----------
+    # ---------- Agenda: mes vigente + 2 meses + demais unidades ----------
     with sub_atual:
         st.subheader("Agenda de próximas inaugurações")
         st.markdown(
             "<div class='section-note'>Projetos <b>previstos</b> da aba Geral, pela Data Prevista, no mês atual e nos 2 meses seguintes, "
-            "separados por tipo. Datas em vermelho já passaram e o projeto ainda não foi realizado. Segue os filtros da barra lateral.</div>",
+            "separados por tipo. A última aba reúne as demais unidades (previsão posterior, anterior ou sem data), por mês e por marca. "
+            "Datas em vermelho já passaram e o projeto ainda não foi realizado. Segue os filtros da barra lateral.</div>",
             unsafe_allow_html=True,
         )
-        ag = ag_base[ag_base["Data Prevista"].notna()].copy()
-        ag["_periodo"] = ag["Data Prevista"].dt.to_period("M")
-        abas_mes = st.tabs([
-            f"{MESES_PT[p.month - 1]}/{p.year} ({int((ag['_periodo'] == p).sum())})" for p in meses_ag
-        ])
-        for periodo, aba in zip(meses_ag, abas_mes):
+        d_prev = ag_base["Data Prevista"]
+        na_janela = ag_base[d_prev.between(janela_ini, janela_fim)].copy()
+        demais = ag_base[~d_prev.between(janela_ini, janela_fim)].copy()
+        na_janela["_periodo"] = na_janela["Data Prevista"].dt.to_period("M")
+
+        abas_mes = st.tabs(
+            [f"{MESES_PT[p.month - 1]}/{p.year} ({int((na_janela['_periodo'] == p).sum())})" for p in meses_ag]
+            + [f"Demais unidades ({len(demais)})"]
+        )
+        for periodo, aba in zip(meses_ag, abas_mes[:3]):
             with aba:
-                bloco_mes = ag[ag["_periodo"] == periodo]
+                bloco_mes = na_janela[na_janela["_periodo"] == periodo]
                 if bloco_mes.empty:
                     st.info("Nenhum projeto previsto para este mês nos filtros selecionados.")
                     continue
@@ -1104,159 +1152,57 @@ with tab_agenda:
                     sub = bloco_mes[bloco_mes["Tipo Painel"] == tipo].sort_values(["Data Prevista", "Restaurante"])
                     if sub.empty:
                         continue
-                    st.markdown(
-                        f"<div style='margin:6px 0 6px 2px;font-size:17px;font-weight:800;color:{TIPO_COLORS.get(tipo, DARK)};'>"
-                        f"{html.escape(tipo)} <span style='font-size:13px;color:#777;font-weight:600;'>· {len(sub)}</span></div>",
-                        unsafe_allow_html=True,
-                    )
+                    st.markdown(titulo_bloco(tipo, len(sub), TIPO_COLORS.get(tipo, DARK)), unsafe_allow_html=True)
                     st.markdown(html_agenda(sub, hoje_ag), unsafe_allow_html=True)
 
-    # ---------- Aba 2: demais unidades (fora da janela de 3 meses) ----------
-    with sub_demais:
-        st.subheader("Demais unidades")
-        st.markdown(
-            f"<div class='section-note'>Projetos <b>previstos</b> que não estão na agenda atual "
-            f"({MESES_PT[meses_ag[0].month - 1]}/{meses_ag[0].year} a {MESES_PT[meses_ag[-1].month - 1]}/{meses_ag[-1].year}): "
-            "previsão acima de 3 meses, sem previsão definida e previsão anterior ao mês atual (ainda não realizados).</div>",
-            unsafe_allow_html=True,
-        )
-        d = ag_base["Data Prevista"]
-        grupos_demais = [
-            ("Previsão acima de 3 meses", ag_base[d > janela_fim], BLUE),
-            ("Sem previsão de inauguração definida", ag_base[d.isna()], GRAY),
-            ("Previsão anterior ao mês atual", ag_base[d < janela_ini], RED),
-        ]
-        cols_demais = st.columns(len(grupos_demais))
-        for col, (nome, df_g, cor) in zip(cols_demais, grupos_demais):
-            with col:
-                st.markdown(card_html(nome.upper(), len(df_g), "projetos previstos", cor), unsafe_allow_html=True)
-        total_agenda = int(((d >= janela_ini) & (d <= janela_fim)).sum())
-        st.caption(
-            f"Conferência: {total_agenda} na agenda atual + {sum(len(g[1]) for g in grupos_demais)} nesta aba "
-            f"= {len(ag_base)} projetos previstos nos filtros selecionados."
-        )
-        for nome, df_g, cor in grupos_demais:
+        with abas_mes[3]:
             st.markdown(
-                f"<div style='margin:18px 0 4px 0;font-size:19px;font-weight:900;color:{cor};'>{html.escape(nome)} "
-                f"<span style='font-size:14px;color:#777;font-weight:600;'>· {len(df_g)}</span></div>",
+                f"<div class='section-note'>Previsão fora de {MESES_PT[meses_ag[0].month - 1]}/{meses_ag[0].year} a "
+                f"{MESES_PT[meses_ag[-1].month - 1]}/{meses_ag[-1].year} ou ainda sem data definida. "
+                f"Conferência: {len(na_janela)} na agenda + {len(demais)} aqui = {len(ag_base)} projetos previstos.</div>",
                 unsafe_allow_html=True,
             )
-            if df_g.empty:
-                st.caption("Nenhum projeto neste grupo.")
-                continue
-            for tipo in tipos_ag:
-                sub = df_g[df_g["Tipo Painel"] == tipo].sort_values(["Data Prevista", "Restaurante"], na_position="last")
-                if sub.empty:
-                    continue
-                st.markdown(
-                    f"<div style='margin:6px 0 6px 2px;font-size:16px;font-weight:800;color:{TIPO_COLORS.get(tipo, DARK)};'>"
-                    f"{html.escape(tipo)} <span style='font-size:13px;color:#777;font-weight:600;'>· {len(sub)}</span></div>",
-                    unsafe_allow_html=True,
-                )
-                st.markdown(html_agenda(sub, hoje_ag), unsafe_allow_html=True)
+            if demais.empty:
+                st.info("Nenhuma unidade fora da agenda atual nos filtros selecionados.")
+            else:
+                demais["_periodo"] = demais["Data Prevista"].dt.to_period("M")
+                periodos_demais = sorted(demais["_periodo"].dropna().unique())
+                secoes = [(f"{MESES_PT[p.month - 1]}/{p.year}", demais[demais["_periodo"] == p], p < periodo_ini) for p in periodos_demais]
+                sem_data = demais[demais["Data Prevista"].isna()]
+                if not sem_data.empty:
+                    secoes.append(("Sem previsão definida", sem_data, False))
+                for nome_secao, df_secao, anterior in secoes:
+                    cor_secao = RED if anterior else (GRAY if nome_secao.startswith("Sem") else BLUE)
+                    rotulo = nome_secao + (" · anterior ao mês atual" if anterior else "")
+                    st.markdown(titulo_bloco(rotulo, len(df_secao), cor_secao, tamanho=20), unsafe_allow_html=True)
+                    for nome_marca, df_marca in blocos_por_marca(df_secao):
+                        st.markdown(titulo_bloco(nome_marca.upper(), len(df_marca), DARK, tamanho=15), unsafe_allow_html=True)
+                        ordenado = df_marca.sort_values(["Data Prevista", "Tipo Painel", "Restaurante"], na_position="last")
+                        st.markdown(html_agenda(ordenado, hoje_ag, mostrar_tipo=True), unsafe_allow_html=True)
 
-    # ---------- Aba 3: projetos realizados em 2026 ----------
+    # ---------- Realizados em 2026: lista por mes e por marca ----------
     with sub_real:
         st.subheader("Projetos realizados em 2026")
         st.markdown(
-            "<div class='section-note'>Somente projetos com Status <b>Realizado</b> e Data Realizada em 2026 (aba Geral). "
-            "CAPEX entregue = Enviado ou Em acompanhamento; Não entregue = Não enviado, Não preenchido ou vazio; "
-            "Não se aplica fica fora do percentual. Segue os filtros de marca e tipo da barra lateral.</div>",
+            "<div class='section-note'>Somente projetos com Status <b>Realizado</b> e Data Realizada em 2026 (aba Geral), por mês e por marca. "
+            "CAPEX entregue = Enviado ou Em acompanhamento; não entregue = Não enviado, Não preenchido ou vazio. "
+            "Segue os filtros de marca e tipo da barra lateral.</div>",
             unsafe_allow_html=True,
         )
-        rl = real_f.copy()
-        rl = rl[rl["Data Realizada"].notna()].copy()
+        rl = real_f[real_f["Data Realizada"].notna()].copy()
         if rl.empty:
             st.info("Nenhum projeto realizado em 2026 nos filtros selecionados.")
         else:
             rl["Mês"] = rl["Data Realizada"].dt.month
-            rl["Mês nome"] = rl["Mês"].map(lambda m: MESES_ABREV[int(m) - 1])
             rl["CAPEX"] = rl["Capex"].map(classificar_capex) if "Capex" in rl.columns else "Não entregue"
-            n_ent = int((rl["CAPEX"] == "Entregue").sum())
-            n_nao = int((rl["CAPEX"] == "Não entregue").sum())
-            n_na = int((rl["CAPEX"] == "Não se aplica").sum())
-
-            k1, k2, k3, k4 = st.columns(4)
-            with k1:
-                st.markdown(card_html("REALIZADOS EM 2026", len(rl), "projetos concluídos", ORANGE), unsafe_allow_html=True)
-            with k2:
-                st.markdown(card_html("CAPEX ENTREGUE", n_ent, "projetos", GREEN), unsafe_allow_html=True)
-            with k3:
-                st.markdown(card_html("CAPEX NÃO ENTREGUE", n_nao, "projetos", RED), unsafe_allow_html=True)
-            with k4:
-                st.markdown(card_html("% COM CAPEX", pct_capex(n_ent, n_nao), f"entregue ÷ (entregue + não entregue) · {n_na} não se aplica", TEAL), unsafe_allow_html=True)
-
-            st.write("")
-            ordem_marcas = rl["Marca"].value_counts().index.tolist()
-            cores_marca = {m: MARCA_PALETA[i % len(MARCA_PALETA)] for i, m in enumerate(ordem_marcas)}
-            g1, g2 = st.columns(2)
-            with g1:
-                st.subheader("Realizados por mês e marca")
-                vol = rl.groupby(["Mês", "Mês nome", "Marca"]).size().reset_index(name="Projetos").sort_values("Mês")
-                fig = px.bar(
-                    vol, x="Mês nome", y="Projetos", color="Marca", barmode="stack", text_auto=True,
-                    category_orders={"Mês nome": [MESES_ABREV[m - 1] for m in sorted(rl["Mês"].unique())], "Marca": ordem_marcas},
-                    color_discrete_map=cores_marca,
-                )
-                fig.update_layout(height=400, plot_bgcolor="white", paper_bgcolor="white", legend_title_text="", xaxis_title="", yaxis_title="Projetos")
-                st.plotly_chart(fig, use_container_width=True)
-            with g2:
-                st.subheader("CAPEX por marca")
-                cap = rl.groupby(["Marca", "CAPEX"]).size().reset_index(name="Projetos")
-                fig = px.bar(
-                    cap, y="Marca", x="Projetos", color="CAPEX", orientation="h", barmode="stack", text_auto=True,
-                    category_orders={"Marca": ordem_marcas[::-1], "CAPEX": ["Entregue", "Não entregue", "Não se aplica"]},
-                    color_discrete_map={"Entregue": GREEN, "Não entregue": RED, "Não se aplica": "#C9C9C9"},
-                )
-                fig.update_layout(height=400, plot_bgcolor="white", paper_bgcolor="white", legend_title_text="", xaxis_title="Projetos", yaxis_title="")
-                st.plotly_chart(fig, use_container_width=True)
-
-            # matriz marca x mes
-            st.subheader("Volume por marca e por mês")
-            meses_presentes = sorted(rl["Mês"].unique())
-            linhas_m = []
-            for marca in ordem_marcas + ["TOTAL"]:
-                sub = rl if marca == "TOTAL" else rl[rl["Marca"] == marca]
-                lin = {"Marca": marca}
-                for m in meses_presentes:
-                    lin[MESES_ABREV[int(m) - 1]] = int((sub["Mês"] == m).sum())
-                e = int((sub["CAPEX"] == "Entregue").sum())
-                nn = int((sub["CAPEX"] == "Não entregue").sum())
-                lin["Total"] = len(sub)
-                lin["CAPEX entregue"] = e
-                lin["% CAPEX"] = pct_capex(e, nn)
-                linhas_m.append(lin)
-            st.dataframe(pd.DataFrame(linhas_m), use_container_width=True, hide_index=True)
-
-            # lista detalhada por marca
-            st.subheader("Projetos realizados por marca")
-            selo = {"Entregue": ("✅ Entregue", GREEN), "Não entregue": ("❌ Não entregue", RED), "Não se aplica": ("➖ Não se aplica", "#888")}
-            for marca in ordem_marcas:
-                sub = rl[rl["Marca"] == marca].sort_values(["Data Realizada", "Restaurante"])
-                e = int((sub["CAPEX"] == "Entregue").sum())
-                nn = int((sub["CAPEX"] == "Não entregue").sum())
-                with st.expander(f"{marca} · {len(sub)} projeto(s) · CAPEX entregue: {pct_capex(e, nn)}"):
-                    cab = "".join(
-                        f"<th style='text-align:left;padding:8px 10px;font-size:12px;color:#555;border-bottom:2px solid {ORANGE};white-space:nowrap;'>{t}</th>"
-                        for t in ["Mês", "Data de realização", "Unidade / projeto", "Tipo", "CAPEX"]
-                    )
-                    linhas = ""
-                    for _, r in sub.iterrows():
-                        texto, cor = selo[r["CAPEX"]]
-                        detalhe = "" if pd.isna(r.get("Capex")) else f"<div style='font-size:11px;color:#888;font-weight:500;'>{html.escape(str(r['Capex']).strip())}</div>"
-                        linhas += (
-                            "<tr style='border-bottom:1px solid #F0F0F0;vertical-align:top;'>"
-                            f"<td style='padding:8px 10px;white-space:nowrap;'>{MESES_PT[int(r['Mês']) - 1]}</td>"
-                            f"<td style='padding:8px 10px;white-space:nowrap;font-weight:700;'>{r['Data Realizada'].strftime('%d/%m/%Y')}</td>"
-                            f"<td style='padding:8px 10px;font-weight:700;color:{DARK};min-width:220px;'>{html.escape(str(r['Restaurante']))}</td>"
-                            f"<td style='padding:8px 10px;'>{html.escape(str(r['Tipo Painel']))}</td>"
-                            f"<td style='padding:8px 10px;color:{cor};font-weight:800;white-space:nowrap;'>{texto}{detalhe}</td></tr>"
-                        )
-                    st.markdown(
-                        "<div style='overflow-x:auto;'><table style='width:100%;border-collapse:collapse;'>"
-                        f"<thead><tr>{cab}</tr></thead><tbody>{linhas}</tbody></table></div>",
-                        unsafe_allow_html=True,
-                    )
+            meses_real = sorted(rl["Mês"].unique())
+            abas_real = st.tabs([f"{MESES_PT[int(m) - 1]} ({int((rl['Mês'] == m).sum())})" for m in meses_real])
+            for m, aba in zip(meses_real, abas_real):
+                with aba:
+                    bloco_m = rl[rl["Mês"] == m]
+                    for nome_marca, df_marca in blocos_por_marca(bloco_m):
+                        st.markdown(titulo_bloco(nome_marca.upper(), len(df_marca), DARK, tamanho=16), unsafe_allow_html=True)
+                        st.markdown(html_realizados(df_marca.sort_values(["Data Realizada", "Restaurante"])), unsafe_allow_html=True)
 
 # =========================================================
 # DETALHAMENTO
